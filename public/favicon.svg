@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Lovv Admin">
+  <rect width="64" height="64" rx="14" fill="#FF7017"/>
+  <path d="M18 23c0-5.5 4.5-10 10-10h8c5.5 0 10 4.5 10 10v4h4c2.2 0 4 1.8 4 4v16c0 2.2-1.8 4-4 4H14c-2.2 0-4-1.8-4-4V31c0-2.2 1.8-4 4-4h4v-4Zm8 4h12v-4c0-1.1-.9-2-2-2h-8c-1.1 0-2 .9-2 2v4Z" fill="#33271E"/>
+  <circle cx="32" cy="39" r="5" fill="#FFF8F6"/>
+</svg>
