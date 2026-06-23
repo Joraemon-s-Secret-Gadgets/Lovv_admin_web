@@ -3,13 +3,16 @@
 // data flows through ./adminApi; the backend re-authorizes every call, so this
 // gating is UX, not a security boundary.
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { createAdminApiClient } from './adminApi'
-import { localMetrics, proposalDraft, publishEvents, roleLanes, summaryMetrics } from './adminData'
-import { getSessionRoles, resolvePrimaryRole } from './session'
+import { createAdminApiClient, createAdminAuthClient } from './adminApi'
+import { localMetrics, proposalDraft, roleLanes, summaryMetrics } from './adminData'
+import { getSessionRoles, getStoredAccessToken, resolvePrimaryRole, storeAccessToken } from './session'
 import type {
   AdminProposalRequest,
   AdminRole,
   AdminTab,
+  MonthlyDestination,
+  MonthlyDestinationAction,
+  MonthlyDestinationStatus,
   ProposalHistoryItem,
   ProposalStatus,
   ReviewProposal,
@@ -36,20 +39,6 @@ const roleDefaultTab: Record<AdminRole, AdminTab> = {
   'R-LOCAL-OPERATOR': 'metrics',
   'R-DATA-PROVIDER': 'proposal',
   'R-ADMIN': 'metrics',
-}
-
-const statusLabels: Record<ProposalStatus, string> = {
-  draft: '초안',
-  pending: '대기',
-  submitted: '제출',
-  in_review: '검토중',
-  approved: '승인',
-  rejected: '반려',
-  change_requested: '수정 요청',
-  withdrawn: '철회',
-  archived: '보관',
-  published: '반영',
-  indexed: '인덱스 갱신',
 }
 
 const toneLabelClassNames: Record<SummaryMetric['tone'], string> = {
@@ -376,39 +365,127 @@ function ReviewQueuePanel({
   )
 }
 
-function PublishStatusTimeline() {
+const monthlyStatusLabels: Record<MonthlyDestinationStatus, string> = {
+  candidate: '후보',
+  scheduled: '게시 예약',
+  published: '게시됨',
+  hidden: '숨김',
+  expired: '만료',
+  rejected: '거부',
+}
+
+// Mirror of the backend publish state machine. The UI only offers the actions
+// that are legal for a row's current status; the server re-validates anyway.
+const monthlyAllowedActions: Record<MonthlyDestinationStatus, MonthlyDestinationAction[]> = {
+  candidate: ['schedule', 'publish', 'reject'],
+  scheduled: ['publish', 'expire', 'reject'],
+  published: ['hide', 'expire'],
+  hidden: ['publish', 'expire'],
+  expired: [],
+  rejected: [],
+}
+
+const monthlyActionLabels: Record<MonthlyDestinationAction, string> = {
+  schedule: '예약',
+  publish: '게시',
+  hide: '숨김',
+  expire: '만료',
+  reject: '거부',
+}
+
+type MonthlyDestinationPanelProps = {
+  items: MonthlyDestination[]
+  isLoading: boolean
+  errorMessage: string | null
+  isMutating: boolean
+  canManage: boolean
+  onTransition: (destinationId: string, action: MonthlyDestinationAction) => void
+  onRefresh: () => void
+}
+
+function MonthlyDestinationPanel({
+  items,
+  isLoading,
+  errorMessage,
+  isMutating,
+  canManage,
+  onTransition,
+  onRefresh,
+}: MonthlyDestinationPanelProps) {
   return (
     <section className="panel" aria-labelledby="publish-title">
       <div className="section-heading">
         <span className="section-kicker">Publish Pipeline</span>
-        <h2 id="publish-title">데이터 반영 타임라인</h2>
+        <h2 id="publish-title">월간 여행지 후보·게시 상태</h2>
+        <button type="button" className="ghost-button" onClick={onRefresh} disabled={isLoading}>
+          새로고침
+        </button>
       </div>
-      <ol className="timeline">
-        {publishEvents.map((event) => (
-          <li key={event.key}>
-            <time>{event.timestamp}</time>
-            <div>
-              <h3>{event.title}</h3>
-              <p>{event.description}</p>
-              <span
-                className={`status-pill status-${event.status}`}
-                data-alignment="centered"
-                data-contrast={getStatusContrast(event.status)}
-              >
-                {statusLabels[event.status]}
-              </span>
-            </div>
-          </li>
-        ))}
-      </ol>
+      {errorMessage ? (
+        <p role="alert" className="error-text">
+          {errorMessage}
+        </p>
+      ) : null}
+      {isLoading ? (
+        <p>월간 후보를 불러오는 중입니다.</p>
+      ) : items.length === 0 ? (
+        <p>표시할 월간 후보가 없습니다. 승인된 제안을 후보로 등록하세요.</p>
+      ) : (
+        <table aria-label="월간 여행지 후보 목록">
+          <thead>
+            <tr>
+              <th scope="col">도시</th>
+              <th scope="col">대상 월</th>
+              <th scope="col">테마</th>
+              <th scope="col">상태</th>
+              {canManage ? <th scope="col">상태 변경</th> : null}
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => (
+              <tr key={item.id}>
+                <td>{item.cityName}</td>
+                <td>{item.curationMonth}</td>
+                <td>{item.themeCodes.join(', ')}</td>
+                <td>
+                  <span className={`status-pill status-${item.status}`}>{monthlyStatusLabels[item.status]}</span>
+                </td>
+                {canManage ? (
+                  <td>
+                    {monthlyAllowedActions[item.status].length === 0 ? (
+                      <span>—</span>
+                    ) : (
+                      monthlyAllowedActions[item.status].map((action) => (
+                        <button
+                          key={action}
+                          type="button"
+                          disabled={isMutating}
+                          onClick={() => onTransition(item.id, action)}
+                        >
+                          {monthlyActionLabels[action]}
+                        </button>
+                      ))
+                    )}
+                  </td>
+                ) : null}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </section>
   )
 }
 
 export function AdminDashboard() {
+  // Access token drives both the API client (Bearer header) and the session role.
+  // Initial value is the cached token (survives refresh); if absent we restore it
+  // from /api/v1/auth/session below. getSessionRoles() also falls back to the Vite
+  // dev token, so local development still works without a real login.
+  const [accessToken, setAccessToken] = useState<string>(() => getStoredAccessToken())
   // Session role comes from the token, not a manual switcher, so the UI matches
   // what the backend will actually allow for this caller.
-  const sessionRoles = useMemo(() => getSessionRoles(), [])
+  const sessionRoles = useMemo(() => getSessionRoles(accessToken), [accessToken])
   const currentRole = useMemo(() => resolvePrimaryRole(sessionRoles), [sessionRoles])
   const [activeTab, setActiveTab] = useState<AdminTab>(() =>
     currentRole ? roleDefaultTab[currentRole] : 'metrics',
@@ -420,7 +497,35 @@ export function AdminDashboard() {
   const [proposalHistory, setProposalHistory] = useState<ProposalHistoryItem[]>([])
   const [isHistoryLoading, setIsHistoryLoading] = useState(false)
   const activePanelId = useMemo(() => `admin-panel-${activeTab}`, [activeTab])
-  const adminApi = useMemo(() => createAdminApiClient(), [])
+  const adminApi = useMemo(
+    () => createAdminApiClient(accessToken ? { accessToken } : {}),
+    [accessToken],
+  )
+  const authClient = useMemo(() => createAdminAuthClient(), [])
+
+  // On first load without a cached/dev token, exchange the session cookie for an
+  // access token. Failures are swallowed: an unauthenticated visitor simply sees
+  // the "no session role" panel, and the backend still rejects any API call.
+  useEffect(() => {
+    if (getSessionRoles(accessToken).length > 0) {
+      return
+    }
+    let isCurrent = true
+    authClient
+      .restoreSession()
+      .then((session) => {
+        if (isCurrent && session.accessToken) {
+          storeAccessToken(session.accessToken)
+          setAccessToken(session.accessToken)
+        }
+      })
+      .catch(() => {
+        // Unauthenticated or session expired; gating falls back to "no role".
+      })
+    return () => {
+      isCurrent = false
+    }
+  }, [accessToken, authClient])
 
   const loadProposals = useCallback(async () => {
     setIsProposalLoading(true)
@@ -462,6 +567,49 @@ export function AdminDashboard() {
       isCurrent = false
     }
   }, [adminApi])
+
+  const [monthlyItems, setMonthlyItems] = useState<MonthlyDestination[]>([])
+  const [isMonthlyLoading, setIsMonthlyLoading] = useState(false)
+  const [monthlyError, setMonthlyError] = useState<string | null>(null)
+  const [isMonthlyMutating, setIsMonthlyMutating] = useState(false)
+
+  const loadMonthly = useCallback(async () => {
+    setIsMonthlyLoading(true)
+    setMonthlyError(null)
+    try {
+      const items = await adminApi.listMonthlyDestinations()
+      setMonthlyItems(items)
+    } catch (error) {
+      setMonthlyError(error instanceof Error ? error.message : '월간 후보를 불러오지 못했습니다.')
+      setMonthlyItems([])
+    } finally {
+      setIsMonthlyLoading(false)
+    }
+  }, [adminApi])
+
+  // Load monthly candidates lazily, only when the 반영 상태 tab is opened.
+  useEffect(() => {
+    if (activeTab !== 'publish') {
+      return
+    }
+    void loadMonthly()
+  }, [activeTab, loadMonthly])
+
+  const handleMonthlyTransition = useCallback(
+    async (destinationId: string, action: MonthlyDestinationAction) => {
+      setIsMonthlyMutating(true)
+      setMonthlyError(null)
+      try {
+        await adminApi.transitionMonthlyDestination(destinationId, action)
+        await loadMonthly()
+      } catch (error) {
+        setMonthlyError(error instanceof Error ? error.message : '상태 변경에 실패했습니다.')
+      } finally {
+        setIsMonthlyMutating(false)
+      }
+    },
+    [adminApi, loadMonthly],
+  )
 
   async function handleCreateProposal() {
     setIsProposalMutating(true)
@@ -626,7 +774,17 @@ export function AdminDashboard() {
                 isHistoryLoading={isHistoryLoading}
               />
             )}
-            {activeTab === 'publish' && <PublishStatusTimeline />}
+            {activeTab === 'publish' && (
+              <MonthlyDestinationPanel
+                items={monthlyItems}
+                isLoading={isMonthlyLoading}
+                errorMessage={monthlyError}
+                isMutating={isMonthlyMutating}
+                canManage={currentRole === 'R-ADMIN'}
+                onTransition={(destinationId, action) => void handleMonthlyTransition(destinationId, action)}
+                onRefresh={() => void loadMonthly()}
+              />
+            )}
           </>
         )}
       </div>

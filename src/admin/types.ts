@@ -126,3 +126,67 @@ export type PublishEvent = {
   description: string
   timestamp: string
 }
+
+// Monthly curated destination (step 11). Its own status enum, kept separate from
+// ProposalStatus because the publish state machine is distinct from review.
+export type MonthlyDestinationStatus =
+  | 'candidate'
+  | 'scheduled'
+  | 'published'
+  | 'hidden'
+  | 'expired'
+  | 'rejected'
+
+export type MonthlyDestinationAction = 'schedule' | 'publish' | 'hide' | 'expire' | 'reject'
+
+export type MonthlyDestinationResponse = {
+  id?: string
+  cityId?: string | null
+  cityName?: string | null
+  regionId?: string
+  sourceProposalId?: string | null
+  curationMonth?: string
+  themeCodes?: string[]
+  officialSourceName?: string | null
+  officialSourceUrl?: string | null
+  sourceUpdatedAt?: string | null
+  validFrom?: string | null
+  validUntil?: string | null
+  status?: MonthlyDestinationStatus
+  publishReason?: string | null
+  publishedBy?: string | null
+  publishedAt?: string | null
+  hiddenBy?: string | null
+  hiddenAt?: string | null
+  hiddenReason?: string | null
+  createdAt?: string | null
+  updatedAt?: string | null
+}
+
+// Adapted view model used by the publish panel.
+export type MonthlyDestination = {
+  id: string
+  cityName: string
+  regionId: string
+  curationMonth: string
+  themeCodes: string[]
+  status: MonthlyDestinationStatus
+  officialSourceUrl?: string | null
+  publishReason?: string | null
+  hiddenReason?: string | null
+  updatedAt?: string | null
+}
+
+export type MonthlyDestinationPromoteRequest = {
+  sourceProposalId: string
+  curationMonth: string
+  themeCodes: string[]
+  cityName?: string
+  regionId?: string
+}
+
+export type MonthlyDestinationActionRequest = {
+  reason?: string
+  validFrom?: string
+  validUntil?: string
+}

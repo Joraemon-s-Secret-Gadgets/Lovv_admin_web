@@ -51,6 +51,7 @@ describe('Lovv admin console', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.unstubAllEnvs()
+    window.localStorage.clear()
   })
 
   it('renders the admin workflow overview with role-based lanes', () => {
@@ -218,14 +219,95 @@ describe('Lovv admin console', () => {
     expect(screen.getByText('표시할 제안이 없습니다.')).toBeInTheDocument()
   })
 
-  it('summarizes publish, index refresh, and user recommendation reflection states', () => {
-    render(<App />)
+  it('lists monthly curated destinations from the admin API in the 반영 상태 tab', async () => {
+    const monthly = {
+      id: 'monthly-1',
+      cityName: '강릉',
+      regionId: 'KR-42-150',
+      curationMonth: '2026-10',
+      themeCodes: ['coffee', 'festival'],
+      status: 'candidate',
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.includes('/api/v1/admin/monthly-destinations')) {
+        return jsonResponse({ items: [monthly] })
+      }
+      return jsonResponse({ items: [] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
 
+    render(<App />)
     fireEvent.click(screen.getByRole('tab', { name: '반영 상태' }))
 
-    expect(screen.getByRole('heading', { name: '데이터 반영 타임라인' })).toBeInTheDocument()
-    expect(screen.getByText('제안 승인 완료')).toBeInTheDocument()
-    expect(screen.getByText('서비스 데이터 반영')).toBeInTheDocument()
-    expect(screen.getByText('추천/RAG 인덱스 갱신')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('heading', { name: '월간 여행지 후보·게시 상태' }),
+    ).toBeInTheDocument()
+    const table = await screen.findByRole('table', { name: '월간 여행지 후보 목록' })
+    expect(within(table).getByText('강릉')).toBeInTheDocument()
+    expect(within(table).getByText('2026-10')).toBeInTheDocument()
+    expect(within(table).getByText('후보')).toBeInTheDocument()
+    // R-ADMIN can manage, so candidate-stage transition buttons are offered.
+    expect(within(table).getByRole('button', { name: '게시' })).toBeInTheDocument()
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/admin/monthly-destinations')),
+    ).toBe(true)
   })
+
+  it('sends a monthly destination transition to the backend API', async () => {
+    const candidate = {
+      id: 'monthly-1',
+      cityName: '강릉',
+      regionId: 'KR-42-150',
+      curationMonth: '2026-10',
+      themeCodes: ['coffee'],
+      status: 'candidate',
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.includes('/monthly-destinations/monthly-1/publish')) {
+        return jsonResponse({ destination: { ...candidate, status: 'published' } })
+      }
+      if (url.includes('/api/v1/admin/monthly-destinations')) {
+        return jsonResponse({ items: [candidate] })
+      }
+      return jsonResponse({ items: [] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+    fireEvent.click(screen.getByRole('tab', { name: '반영 상태' }))
+    const table = await screen.findByRole('table', { name: '월간 여행지 후보 목록' })
+    fireEvent.click(within(table).getByRole('button', { name: '게시' }))
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input, init]) =>
+          String(input).includes('/monthly-destinations/monthly-1/publish') &&
+          (init as RequestInit | undefined)?.method === 'POST',
+        ),
+      ).toBe(true),
+    )
+  })
+  it('restores the session token from /api/v1/auth/session when no local token exists', async () => {
+    vi.stubEnv('VITE_LOVV_ADMIN_ACCESS_TOKEN', '')
+    window.localStorage.clear()
+    const adminToken = makeToken(['R-ADMIN'])
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.includes('/api/v1/auth/session')) {
+        return jsonResponse({ accessToken: adminToken, user: { userId: 'admin-1', roles: ['R-ADMIN'] } })
+      }
+      return jsonResponse({ items: [] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+
+    await waitFor(() =>
+      expect(screen.getByTestId('current-role-badge')).toHaveTextContent('R-ADMIN'),
+    )
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/auth/session'))).toBe(true)
+  })
+
 })
