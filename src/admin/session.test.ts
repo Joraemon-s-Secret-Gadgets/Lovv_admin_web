@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest'
-import { decodeTokenRoles, resolvePrimaryRole } from './session'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  clearAccessToken,
+  decodeTokenRoles,
+  getSessionRoles,
+  getStoredAccessToken,
+  resolvePrimaryRole,
+  storeAccessToken,
+} from './session'
 
 function base64url(input: string) {
   return btoa(input).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
@@ -33,5 +40,61 @@ describe('session role decoding', () => {
     expect(resolvePrimaryRole(['R-LOCAL-OPERATOR', 'R-ADMIN'])).toBe('R-ADMIN')
     expect(resolvePrimaryRole(['R-DATA-PROVIDER', 'R-LOCAL-OPERATOR'])).toBe('R-DATA-PROVIDER')
     expect(resolvePrimaryRole([])).toBeNull()
+  })
+})
+
+
+describe('session access-token storage', () => {
+  afterEach(() => {
+    clearAccessToken()
+    vi.unstubAllEnvs()
+  })
+
+  it('round-trips the access token through localStorage', () => {
+    expect(getStoredAccessToken()).toBe('')
+    storeAccessToken('header.payload.sig')
+    expect(getStoredAccessToken()).toBe('header.payload.sig')
+    clearAccessToken()
+    expect(getStoredAccessToken()).toBe('')
+  })
+
+  it('degrades to an empty token when storage throws', () => {
+    const brokenStorage = {
+      getItem: () => {
+        throw new Error('blocked')
+      },
+    } as unknown as Storage
+    expect(getStoredAccessToken(brokenStorage)).toBe('')
+  })
+})
+
+describe('getSessionRoles precedence', () => {
+  beforeEach(() => {
+    clearAccessToken()
+    vi.unstubAllEnvs()
+  })
+
+  afterEach(() => {
+    clearAccessToken()
+    vi.unstubAllEnvs()
+  })
+
+  it('prefers an explicitly supplied token over the stored and dev tokens', () => {
+    storeAccessToken(makeToken({ roles: ['R-DATA-PROVIDER'] }))
+    vi.stubEnv('VITE_LOVV_ADMIN_ACCESS_TOKEN', makeToken({ roles: ['R-LOCAL-OPERATOR'] }))
+    expect(getSessionRoles(makeToken({ roles: ['R-ADMIN'] }))).toEqual(['R-ADMIN'])
+  })
+
+  it('falls back to the stored token, then the dev token', () => {
+    storeAccessToken(makeToken({ roles: ['R-DATA-PROVIDER'] }))
+    expect(getSessionRoles()).toEqual(['R-DATA-PROVIDER'])
+    clearAccessToken()
+    vi.stubEnv('VITE_LOVV_ADMIN_ACCESS_TOKEN', makeToken({ roles: ['R-ADMIN'] }))
+    expect(getSessionRoles()).toEqual(['R-ADMIN'])
+  })
+
+  it('returns no roles when no token is available anywhere', () => {
+    vi.stubEnv('VITE_LOVV_ADMIN_ACCESS_TOKEN', '')
+    expect(getSessionRoles()).toEqual([])
   })
 })
