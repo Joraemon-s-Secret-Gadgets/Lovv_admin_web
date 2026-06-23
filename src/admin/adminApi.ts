@@ -11,6 +11,10 @@ import type {
   MonthlyDestinationPromoteRequest,
   MonthlyDestinationResponse,
   ProposalHistoryItem,
+  PublishJob,
+  PublishJobAction,
+  PublishJobActionRequest,
+  PublishJobResponse,
   ReviewProposal,
 } from './types'
 
@@ -54,6 +58,14 @@ type MonthlyDestinationListResponse = {
 
 type MonthlyDestinationMutationResponse = {
   destination?: MonthlyDestinationResponse
+}
+
+type PublishJobListResponse = {
+  items?: PublishJobResponse[]
+}
+
+type PublishJobMutationResponse = {
+  job?: PublishJobResponse
 }
 
 const defaultApiBaseUrl = import.meta.env.VITE_LOVV_API_BASE_URL?.trim() ?? ''
@@ -189,6 +201,28 @@ export function createAdminApiClient(options: AdminApiClientOptions = {}) {
       )
       return adaptMonthlyDestination(payload.destination)
     },
+    // Reflection history for a published destination (the publish jobs trail).
+    async listDestinationPublishJobs(destinationId: string) {
+      const payload = await request<PublishJobListResponse>(
+        `/api/v1/admin/monthly-destinations/${encodeURIComponent(destinationId)}/publish-jobs`,
+      )
+      return (payload.items ?? []).map(adaptPublishJob)
+    },
+    // Drive a reflection job through its status machine (start/succeed/fail/retry/cancel).
+    async transitionPublishJob(
+      jobId: string,
+      action: PublishJobAction,
+      input: PublishJobActionRequest = {},
+    ) {
+      const payload = await request<PublishJobMutationResponse>(
+        `/api/v1/admin/publish-jobs/${encodeURIComponent(jobId)}/${action}`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+      )
+      return adaptPublishJob(payload.job)
+    },
   }
 }
 
@@ -223,6 +257,18 @@ export function adaptMonthlyDestination(destination: MonthlyDestinationResponse 
     publishReason: destination?.publishReason ?? null,
     hiddenReason: destination?.hiddenReason ?? null,
     updatedAt: destination?.updatedAt ?? null,
+  }
+}
+
+export function adaptPublishJob(job: PublishJobResponse | undefined): PublishJob {
+  return {
+    id: job?.id ?? '',
+    destinationId: job?.monthlyCuratedDestinationId ?? '',
+    jobType: job?.jobType ?? 'catalog_sync',
+    status: job?.status ?? 'queued',
+    attemptCount: job?.attemptCount ?? 0,
+    lastErrorMessage: job?.lastErrorMessage ?? null,
+    updatedAt: job?.updatedAt ?? null,
   }
 }
 

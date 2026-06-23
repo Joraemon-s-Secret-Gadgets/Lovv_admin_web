@@ -15,6 +15,10 @@ import type {
   MonthlyDestinationStatus,
   ProposalHistoryItem,
   ProposalStatus,
+  PublishJob,
+  PublishJobAction,
+  PublishJobStatus,
+  PublishJobType,
   ReviewProposal,
   RoleTabPermissions,
   SummaryMetric,
@@ -393,6 +397,38 @@ const monthlyActionLabels: Record<MonthlyDestinationAction, string> = {
   reject: '거부',
 }
 
+const publishJobStatusLabels: Record<PublishJobStatus, string> = {
+  queued: '대기',
+  running: '실행중',
+  succeeded: '성공',
+  failed: '실패',
+  canceled: '취소',
+}
+
+const publishJobTypeLabels: Record<PublishJobType, string> = {
+  catalog_sync: '카탈로그 동기화',
+  rag_index_sync: 'RAG 인덱스',
+  search_cache_sync: '검색 캐시',
+  recommendation_cache_sync: '추천 캐시',
+}
+
+// Mirror of the backend reflection-job state machine.
+const publishJobAllowedActions: Record<PublishJobStatus, PublishJobAction[]> = {
+  queued: ['start', 'fail', 'cancel'],
+  running: ['succeed', 'fail', 'cancel'],
+  failed: ['retry'],
+  succeeded: [],
+  canceled: [],
+}
+
+const publishJobActionLabels: Record<PublishJobAction, string> = {
+  start: '시작',
+  succeed: '완료',
+  fail: '실패 처리',
+  retry: '재시도',
+  cancel: '취소',
+}
+
 type MonthlyDestinationPanelProps = {
   items: MonthlyDestination[]
   isLoading: boolean
@@ -401,6 +437,13 @@ type MonthlyDestinationPanelProps = {
   canManage: boolean
   onTransition: (destinationId: string, action: MonthlyDestinationAction) => void
   onRefresh: () => void
+  jobs: PublishJob[]
+  jobsDestinationId: string | null
+  isJobsLoading: boolean
+  jobsError: string | null
+  isJobMutating: boolean
+  onLoadJobs: (destinationId: string) => void
+  onJobTransition: (jobId: string, action: PublishJobAction) => void
 }
 
 function MonthlyDestinationPanel({
@@ -411,6 +454,13 @@ function MonthlyDestinationPanel({
   canManage,
   onTransition,
   onRefresh,
+  jobs,
+  jobsDestinationId,
+  isJobsLoading,
+  jobsError,
+  isJobMutating,
+  onLoadJobs,
+  onJobTransition,
 }: MonthlyDestinationPanelProps) {
   return (
     <section className="panel" aria-labelledby="publish-title">
@@ -438,6 +488,7 @@ function MonthlyDestinationPanel({
               <th scope="col">대상 월</th>
               <th scope="col">테마</th>
               <th scope="col">상태</th>
+              <th scope="col">반영</th>
               {canManage ? <th scope="col">상태 변경</th> : null}
             </tr>
           </thead>
@@ -449,6 +500,11 @@ function MonthlyDestinationPanel({
                 <td>{item.themeCodes.join(', ')}</td>
                 <td>
                   <span className={`status-pill status-${item.status}`}>{monthlyStatusLabels[item.status]}</span>
+                </td>
+                <td>
+                  <button type="button" onClick={() => onLoadJobs(item.id)}>
+                    반영 이력
+                  </button>
                 </td>
                 {canManage ? (
                   <td>
@@ -473,6 +529,61 @@ function MonthlyDestinationPanel({
           </tbody>
         </table>
       )}
+      {jobsDestinationId ? (
+        <div className="reflection-history">
+          <h3>데이터 반영 이력</h3>
+          {jobsError ? (
+            <p role="alert" className="error-text">
+              {jobsError}
+            </p>
+          ) : null}
+          {isJobsLoading ? (
+            <p>반영 이력을 불러오는 중입니다.</p>
+          ) : jobs.length === 0 ? (
+            <p>이 후보에 대한 반영 작업이 아직 없습니다. 게시하면 반영 작업이 생성됩니다.</p>
+          ) : (
+            <table aria-label="데이터 반영 작업">
+              <thead>
+                <tr>
+                  <th scope="col">반영 대상</th>
+                  <th scope="col">상태</th>
+                  <th scope="col">시도</th>
+                  {canManage ? <th scope="col">작업</th> : null}
+                </tr>
+              </thead>
+              <tbody>
+                {jobs.map((job) => (
+                  <tr key={job.id}>
+                    <td>{publishJobTypeLabels[job.jobType]}</td>
+                    <td>
+                      <span className={`status-pill status-${job.status}`}>{publishJobStatusLabels[job.status]}</span>
+                    </td>
+                    <td>{job.attemptCount}</td>
+                    {canManage ? (
+                      <td>
+                        {publishJobAllowedActions[job.status].length === 0 ? (
+                          <span>—</span>
+                        ) : (
+                          publishJobAllowedActions[job.status].map((action) => (
+                            <button
+                              key={action}
+                              type="button"
+                              disabled={isJobMutating}
+                              onClick={() => onJobTransition(job.id, action)}
+                            >
+                              {publishJobActionLabels[action]}
+                            </button>
+                          ))
+                        )}
+                      </td>
+                    ) : null}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      ) : null}
     </section>
   )
 }
@@ -568,6 +679,48 @@ export function AdminDashboard() {
     }
   }, [adminApi])
 
+  const [publishJobs, setPublishJobs] = useState<PublishJob[]>([])
+  const [jobsDestinationId, setJobsDestinationId] = useState<string | null>(null)
+  const [isJobsLoading, setIsJobsLoading] = useState(false)
+  const [jobsError, setJobsError] = useState<string | null>(null)
+  const [isJobMutating, setIsJobMutating] = useState(false)
+
+  const loadPublishJobs = useCallback(
+    async (destinationId: string) => {
+      setJobsDestinationId(destinationId)
+      setIsJobsLoading(true)
+      setJobsError(null)
+      try {
+        const items = await adminApi.listDestinationPublishJobs(destinationId)
+        setPublishJobs(items)
+      } catch (error) {
+        setJobsError(error instanceof Error ? error.message : '반영 이력을 불러오지 못했습니다.')
+        setPublishJobs([])
+      } finally {
+        setIsJobsLoading(false)
+      }
+    },
+    [adminApi],
+  )
+
+  const handleJobTransition = useCallback(
+    async (jobId: string, action: PublishJobAction) => {
+      setIsJobMutating(true)
+      setJobsError(null)
+      try {
+        await adminApi.transitionPublishJob(jobId, action)
+        if (jobsDestinationId) {
+          await loadPublishJobs(jobsDestinationId)
+        }
+      } catch (error) {
+        setJobsError(error instanceof Error ? error.message : '반영 작업 상태 변경에 실패했습니다.')
+      } finally {
+        setIsJobMutating(false)
+      }
+    },
+    [adminApi, jobsDestinationId, loadPublishJobs],
+  )
+
   const [monthlyItems, setMonthlyItems] = useState<MonthlyDestination[]>([])
   const [isMonthlyLoading, setIsMonthlyLoading] = useState(false)
   const [monthlyError, setMonthlyError] = useState<string | null>(null)
@@ -602,13 +755,18 @@ export function AdminDashboard() {
       try {
         await adminApi.transitionMonthlyDestination(destinationId, action)
         await loadMonthly()
+        // If this destination's reflection history is open, refresh it so the
+        // jobs created by a publish appear immediately.
+        if (jobsDestinationId === destinationId) {
+          await loadPublishJobs(destinationId)
+        }
       } catch (error) {
         setMonthlyError(error instanceof Error ? error.message : '상태 변경에 실패했습니다.')
       } finally {
         setIsMonthlyMutating(false)
       }
     },
-    [adminApi, loadMonthly],
+    [adminApi, loadMonthly, jobsDestinationId, loadPublishJobs],
   )
 
   async function handleCreateProposal() {
@@ -783,6 +941,13 @@ export function AdminDashboard() {
                 canManage={currentRole === 'R-ADMIN'}
                 onTransition={(destinationId, action) => void handleMonthlyTransition(destinationId, action)}
                 onRefresh={() => void loadMonthly()}
+                jobs={publishJobs}
+                jobsDestinationId={jobsDestinationId}
+                isJobsLoading={isJobsLoading}
+                jobsError={jobsError}
+                isJobMutating={isJobMutating}
+                onLoadJobs={(destinationId) => void loadPublishJobs(destinationId)}
+                onJobTransition={(jobId, action) => void handleJobTransition(jobId, action)}
               />
             )}
           </>

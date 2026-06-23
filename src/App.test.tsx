@@ -310,4 +310,47 @@ describe('Lovv admin console', () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/auth/session'))).toBe(true)
   })
 
+  it('loads reflection job history for a published destination', async () => {
+    const candidate = {
+      id: 'monthly-1',
+      cityName: '강릉',
+      regionId: 'KR-42-150',
+      curationMonth: '2026-10',
+      themeCodes: ['coffee'],
+      status: 'published',
+    }
+    const job = {
+      id: 'job-1',
+      monthlyCuratedDestinationId: 'monthly-1',
+      jobType: 'catalog_sync',
+      status: 'queued',
+      attemptCount: 0,
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.includes('/monthly-destinations/monthly-1/publish-jobs')) {
+        return jsonResponse({ items: [job] })
+      }
+      if (url.includes('/api/v1/admin/monthly-destinations')) {
+        return jsonResponse({ items: [candidate] })
+      }
+      return jsonResponse({ items: [] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+    fireEvent.click(screen.getByRole('tab', { name: '반영 상태' }))
+    const table = await screen.findByRole('table', { name: '월간 여행지 후보 목록' })
+    fireEvent.click(within(table).getByRole('button', { name: '반영 이력' }))
+
+    const jobsTable = await screen.findByRole('table', { name: '데이터 반영 작업' })
+    expect(within(jobsTable).getByText('카탈로그 동기화')).toBeInTheDocument()
+    expect(within(jobsTable).getByText('대기')).toBeInTheDocument()
+    // R-ADMIN can manage, so the queued job offers the start action.
+    expect(within(jobsTable).getByRole('button', { name: '시작' })).toBeInTheDocument()
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).includes('/monthly-destinations/monthly-1/publish-jobs')),
+    ).toBe(true)
+  })
+
 })

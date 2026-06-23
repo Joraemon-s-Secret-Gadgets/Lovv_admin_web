@@ -190,3 +190,43 @@ export type MonthlyDestinationActionRequest = {
   validFrom?: string
   validUntil?: string
 }
+
+// Publish (reflection) job (step 12). A publish fans out into one job per
+// downstream surface; each runs through its own status machine.
+export type PublishJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
+export type PublishJobType =
+  | 'catalog_sync'
+  | 'rag_index_sync'
+  | 'search_cache_sync'
+  | 'recommendation_cache_sync'
+export type PublishJobAction = 'start' | 'succeed' | 'fail' | 'retry' | 'cancel'
+
+export type PublishJobResponse = {
+  id?: string
+  monthlyCuratedDestinationId?: string | null
+  jobType?: PublishJobType
+  status?: PublishJobStatus
+  attemptCount?: number
+  lastErrorCode?: string | null
+  lastErrorMessage?: string | null
+  requestedBy?: string | null
+  startedAt?: string | null
+  finishedAt?: string | null
+  createdAt?: string | null
+  updatedAt?: string | null
+}
+
+export type PublishJob = {
+  id: string
+  destinationId: string
+  jobType: PublishJobType
+  status: PublishJobStatus
+  attemptCount: number
+  lastErrorMessage?: string | null
+  updatedAt?: string | null
+}
+
+export type PublishJobActionRequest = {
+  errorCode?: string
+  errorMessage?: string
+}
