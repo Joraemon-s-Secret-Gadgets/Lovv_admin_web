@@ -1,5 +1,8 @@
 import type { LocalMetric, ProposalDraft, PublishEvent, RoleLane, SummaryMetric } from './types'
 
+// Static copy for panels that are not yet API-backed (role lanes, metric/summary
+// placeholders, publish timeline). Proposal data itself comes from the live API.
+
 export const summaryMetrics: SummaryMetric[] = [
   {
     label: '제출 제안',

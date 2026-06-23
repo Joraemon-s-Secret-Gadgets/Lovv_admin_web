@@ -1,6 +1,11 @@
-import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react'
+// Admin console shell. The active session role is derived from the access token
+// (see ./session), and that role gates which tabs/actions are shown. All proposal
+// data flows through ./adminApi; the backend re-authorizes every call, so this
+// gating is UX, not a security boundary.
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createAdminApiClient } from './adminApi'
 import { localMetrics, proposalDraft, publishEvents, roleLanes, summaryMetrics } from './adminData'
+import { getSessionRoles, resolvePrimaryRole } from './session'
 import type {
   AdminProposalRequest,
   AdminRole,
@@ -19,12 +24,8 @@ const tabs: { id: AdminTab; label: string }[] = [
   { id: 'publish', label: '반영 상태' },
 ]
 
-const roleOptions: { role: AdminRole; label: string }[] = [
-  { role: 'R-ADMIN', label: '관리자 (R-ADMIN)' },
-  { role: 'R-DATA-PROVIDER', label: '데이터 제공자 (R-DATA-PROVIDER)' },
-  { role: 'R-LOCAL-OPERATOR', label: '지역 운영자 (R-LOCAL-OPERATOR)' },
-]
-
+// Which tabs each role may open. Mirrors the backend role matrix; the server is
+// still the enforcer (a hidden tab's API would 403 anyway).
 const roleTabPermissions: RoleTabPermissions = {
   'R-LOCAL-OPERATOR': ['metrics'],
   'R-DATA-PROVIDER': ['proposal'],
@@ -65,12 +66,12 @@ function getStatusContrast(status: ProposalStatus) {
   return highContrastStatusText.has(status) ? 'on-dark' : undefined
 }
 
-function isTabAllowed(role: AdminRole, tabId: AdminTab) {
-  return roleTabPermissions[role].includes(tabId)
+function isTabAllowed(role: AdminRole | null, tabId: AdminTab) {
+  return role ? roleTabPermissions[role].includes(tabId) : false
 }
 
-function getTabLockReason(role: AdminRole, tabLabel: string) {
-  return `역할 접근 제한: ${role} 역할은 ${tabLabel} 작업 영역을 사용할 수 없습니다.`
+function getTabLockReason(role: AdminRole | null, tabLabel: string) {
+  return `역할 접근 제한: ${role ?? '권한 없음'} 역할은 ${tabLabel} 작업 영역을 사용할 수 없습니다.`
 }
 
 function SummaryCards() {
@@ -135,6 +136,22 @@ function LocalOperatorMetrics() {
           </div>
         ))}
       </div>
+    </section>
+  )
+}
+
+function NoSessionRolePanel() {
+  return (
+    <section className="panel" aria-labelledby="no-role-title">
+      <div className="section-heading">
+        <span className="section-kicker">Role Gate</span>
+        <h2 id="no-role-title">유효한 세션 역할이 없습니다</h2>
+      </div>
+      <p>
+        액세스 토큰에서 관리자 역할을 확인하지 못했습니다. 로그인 세션 또는 개발용
+        <code> VITE_LOVV_ADMIN_ACCESS_TOKEN </code>
+        값을 확인해 주세요. 권한 판단은 백엔드에서 다시 검증됩니다.
+      </p>
     </section>
   )
 }
@@ -389,8 +406,13 @@ function PublishStatusTimeline() {
 }
 
 export function AdminDashboard() {
-  const [currentRole, setCurrentRole] = useState<AdminRole>('R-ADMIN')
-  const [activeTab, setActiveTab] = useState<AdminTab>('metrics')
+  // Session role comes from the token, not a manual switcher, so the UI matches
+  // what the backend will actually allow for this caller.
+  const sessionRoles = useMemo(() => getSessionRoles(), [])
+  const currentRole = useMemo(() => resolvePrimaryRole(sessionRoles), [sessionRoles])
+  const [activeTab, setActiveTab] = useState<AdminTab>(() =>
+    currentRole ? roleDefaultTab[currentRole] : 'metrics',
+  )
   const [apiProposals, setApiProposals] = useState<ReviewProposal[]>([])
   const [isProposalLoading, setIsProposalLoading] = useState(true)
   const [proposalError, setProposalError] = useState<string | null>(null)
@@ -440,13 +462,6 @@ export function AdminDashboard() {
       isCurrent = false
     }
   }, [adminApi])
-
-  function handleRoleChange(event: ChangeEvent<HTMLSelectElement>) {
-    const nextRole = event.target.value as AdminRole
-
-    setCurrentRole(nextRole)
-    setActiveTab((currentTab) => (isTabAllowed(nextRole, currentTab) ? currentTab : roleDefaultTab[nextRole]))
-  }
 
   async function handleCreateProposal() {
     setIsProposalMutating(true)
@@ -526,18 +541,9 @@ export function AdminDashboard() {
             <strong>운영자 콘솔 세션</strong>
             <span className="session-type">API Session Preview</span>
             <span className="current-role-badge" data-testid="current-role-badge">
-              현재 {currentRole}
+              현재 {currentRole ?? '역할 없음'}
             </span>
-            <label className="role-select-label" htmlFor="mock-role-select">
-              <span className="role-select-text">현재 세션 역할</span>
-              <select id="mock-role-select" value={currentRole} onChange={handleRoleChange}>
-                {roleOptions.map((option) => (
-                  <option key={option.role} value={option.role}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <span className="role-source-note">세션 역할은 액세스 토큰에서 확인됩니다.</span>
           </div>
         </div>
       </header>
@@ -587,36 +593,42 @@ export function AdminDashboard() {
       </nav>
 
       <div aria-labelledby={`admin-tab-${activeTab}`} className="tab-panel" id={activePanelId} role="tabpanel">
-        {activeTab === 'metrics' && (
-          <div className="stack">
-            <RoleStatusPanel />
-            <LocalOperatorMetrics />
-          </div>
+        {!currentRole ? (
+          <NoSessionRolePanel />
+        ) : (
+          <>
+            {activeTab === 'metrics' && (
+              <div className="stack">
+                <RoleStatusPanel />
+                <LocalOperatorMetrics />
+              </div>
+            )}
+            {activeTab === 'proposal' && (
+              <DataProposalPanel
+                currentRole={currentRole}
+                isSubmitting={isProposalMutating}
+                onCreateProposal={handleCreateProposal}
+              />
+            )}
+            {activeTab === 'review' && (
+              <ReviewQueuePanel
+                currentRole={currentRole}
+                proposals={apiProposals}
+                isLoading={isProposalLoading}
+                errorMessage={proposalError}
+                isMutating={isProposalMutating}
+                onRefresh={loadProposals}
+                onReview={(proposalId) => void mutateProposal('review', proposalId)}
+                onApprove={(proposalId) => void mutateProposal('approve', proposalId)}
+                onReject={(proposalId) => void mutateProposal('reject', proposalId)}
+                onLoadHistory={(proposalId) => void handleLoadHistory(proposalId)}
+                historyItems={proposalHistory}
+                isHistoryLoading={isHistoryLoading}
+              />
+            )}
+            {activeTab === 'publish' && <PublishStatusTimeline />}
+          </>
         )}
-        {activeTab === 'proposal' && (
-          <DataProposalPanel
-            currentRole={currentRole}
-            isSubmitting={isProposalMutating}
-            onCreateProposal={handleCreateProposal}
-          />
-        )}
-        {activeTab === 'review' && (
-          <ReviewQueuePanel
-            currentRole={currentRole}
-            proposals={apiProposals}
-            isLoading={isProposalLoading}
-            errorMessage={proposalError}
-            isMutating={isProposalMutating}
-            onRefresh={loadProposals}
-            onReview={(proposalId) => void mutateProposal('review', proposalId)}
-            onApprove={(proposalId) => void mutateProposal('approve', proposalId)}
-            onReject={(proposalId) => void mutateProposal('reject', proposalId)}
-            onLoadHistory={(proposalId) => void handleLoadHistory(proposalId)}
-            historyItems={proposalHistory}
-            isHistoryLoading={isHistoryLoading}
-          />
-        )}
-        {activeTab === 'publish' && <PublishStatusTimeline />}
       </div>
     </main>
   )

@@ -1,3 +1,5 @@
+// Shared types for the admin console: UI enums (tab/role/status), the API
+// request/response contracts, and the adapted view models used by components.
 export type AdminTab = 'metrics' | 'proposal' | 'review' | 'publish'
 
 export type AdminRole = 'R-LOCAL-OPERATOR' | 'R-DATA-PROVIDER' | 'R-ADMIN'

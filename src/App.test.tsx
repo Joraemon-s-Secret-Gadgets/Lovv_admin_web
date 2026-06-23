@@ -16,6 +16,22 @@ const apiProposal = {
   submittedAt: '2026-06-23T09:00:00Z',
 }
 
+// Build an unsigned JWT-shaped token. The console only base64-decodes the payload
+// to read roles for UI gating; the signature is never verified in the browser.
+function base64url(input: string) {
+  return btoa(input).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function makeToken(roles: string[]) {
+  const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))
+  const payload = base64url(JSON.stringify({ sub: 'dev', roles }))
+  return `${header}.${payload}.signature`
+}
+
+function useSessionRole(role: string) {
+  vi.stubEnv('VITE_LOVV_ADMIN_ACCESS_TOKEN', makeToken([role]))
+}
+
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return Promise.resolve(
     new Response(JSON.stringify(body), {
@@ -28,14 +44,13 @@ function jsonResponse(body: unknown, init: ResponseInit = {}) {
 
 describe('Lovv admin console', () => {
   beforeEach(() => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(jsonResponse({ items: [apiProposal] })),
-    )
+    useSessionRole('R-ADMIN')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ items: [apiProposal] })))
   })
 
   afterEach(() => {
     vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
   })
 
   it('renders the admin workflow overview with role-based lanes', () => {
@@ -47,7 +62,6 @@ describe('Lovv admin console', () => {
     expect(screen.getByRole('tab', { name: '데이터 제안' })).toBeDisabled()
     expect(screen.getByRole('tab', { name: '제안 검토' })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: '반영 상태' })).toBeInTheDocument()
-    expect(screen.getByLabelText('현재 세션 역할')).toHaveValue('R-ADMIN')
     expect(screen.getByTestId('current-role-badge')).toHaveTextContent('R-ADMIN')
 
     expect(screen.getByText('R-LOCAL-OPERATOR')).toBeInTheDocument()
@@ -58,12 +72,12 @@ describe('Lovv admin console', () => {
     expect(screen.getByText('반려/수정 요청')).toBeInTheDocument()
   })
 
-  it('locks proposal access for the default admin role preview', () => {
+  it('locks proposal access for an admin session token', () => {
     render(<App />)
 
     const proposalTab = screen.getByRole('tab', { name: '데이터 제안' })
 
-    expect(screen.getByLabelText('현재 세션 역할')).toHaveValue('R-ADMIN')
+    expect(screen.getByTestId('current-role-badge')).toHaveTextContent('R-ADMIN')
     expect(proposalTab).toBeDisabled()
     expect(proposalTab).toHaveAttribute('aria-disabled', 'true')
     expect(proposalTab).toHaveAttribute('data-locked', 'true')
@@ -72,12 +86,11 @@ describe('Lovv admin console', () => {
     )
   })
 
-  it('switches data providers into the proposal panel and enables provider-owned API actions', () => {
+  it('gates the console to the proposal panel for a data provider token', () => {
+    useSessionRole('R-DATA-PROVIDER')
+
     render(<App />)
 
-    fireEvent.change(screen.getByLabelText('현재 세션 역할'), { target: { value: 'R-DATA-PROVIDER' } })
-
-    expect(screen.getByLabelText('현재 세션 역할')).toHaveValue('R-DATA-PROVIDER')
     expect(screen.getByTestId('current-role-badge')).toHaveTextContent('R-DATA-PROVIDER')
     expect(screen.getByRole('tab', { name: '데이터 제안' })).toBeEnabled()
     expect(screen.getByRole('tab', { name: '데이터 제안' })).toHaveAttribute('aria-selected', 'true')
@@ -87,14 +100,27 @@ describe('Lovv admin console', () => {
     expect(screen.queryByRole('button', { name: '승인' })).not.toBeInTheDocument()
   })
 
+  it('locks every workspace when the token carries no known admin role', () => {
+    useSessionRole('R-USER')
+
+    render(<App />)
+
+    expect(screen.getByTestId('current-role-badge')).toHaveTextContent('역할 없음')
+    expect(screen.getByRole('tab', { name: '운영 지표' })).toBeDisabled()
+    expect(screen.getByRole('tab', { name: '데이터 제안' })).toBeDisabled()
+    expect(screen.getByRole('tab', { name: '제안 검토' })).toBeDisabled()
+    expect(screen.getByRole('tab', { name: '반영 상태' })).toBeDisabled()
+    expect(screen.getByRole('heading', { name: '유효한 세션 역할이 없습니다' })).toBeInTheDocument()
+  })
+
   it('creates a data proposal through the admin API without client-owned authority fields', async () => {
+    useSessionRole('R-DATA-PROVIDER')
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ items: [] }))
       .mockResolvedValueOnce(jsonResponse({ proposal: apiProposal }, { status: 201 }))
     vi.stubGlobal('fetch', fetchMock)
 
     render(<App />)
-    fireEvent.change(screen.getByLabelText('현재 세션 역할'), { target: { value: 'R-DATA-PROVIDER' } })
     fireEvent.click(screen.getByRole('button', { name: '제안 등록' }))
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))

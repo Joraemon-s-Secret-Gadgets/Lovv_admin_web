@@ -1,3 +1,6 @@
+// Thin client for the admin data-proposal API. Attaches the bearer token, maps
+// backend payloads to UI-friendly shapes, and surfaces API errors as AdminApiError.
+// It deliberately never sends ownership/role fields — the server derives those.
 import type {
   AdminProposalHistoryResponse,
   AdminProposalRequest,
@@ -45,6 +48,8 @@ export function createAdminApiClient(options: AdminApiClientOptions = {}) {
   const fetchImpl = options.fetchImpl ?? fetch
 
   async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    // Only Accept / Content-Type / Authorization are set here; request bodies
+    // carry content fields only, never authority fields.
     const headers = new Headers(init.headers)
     headers.set('Accept', 'application/json')
     if (init.body && !headers.has('Content-Type')) {
@@ -124,6 +129,8 @@ export function createAdminApiClient(options: AdminApiClientOptions = {}) {
   }
 }
 
+// Map a backend proposal to the table/decision-panel shape, with safe fallbacks
+// so a partial/!ok payload never crashes the UI.
 export function adaptAdminProposal(proposal: AdminProposalResponse | undefined): ReviewProposal {
   return {
     id: proposal?.proposalId ?? '',
