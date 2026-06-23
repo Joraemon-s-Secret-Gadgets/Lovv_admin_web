@@ -230,3 +230,41 @@ export type PublishJobActionRequest = {
   errorCode?: string
   errorMessage?: string
 }
+
+// Basic destination metrics (step 13). These are aggregated daily/server-side
+// counters; the UI never receives raw user-level events.
+export type DestinationMetricsSummaryResponse = {
+  monthlyCuratedDestinationId?: string
+  cityId?: string | null
+  regionId?: string | null
+  startDate?: string | null
+  endDate?: string | null
+  destinationImpressions?: number
+  destinationDetailOpens?: number
+  itineraryGenerated?: number
+  transportDetailOpens?: number
+  itinerarySaved?: number
+  itinerarySharedOrExported?: number
+  officialLinkClicks?: number
+  partnerLinkClicks?: number
+  visitIntentSubmitted?: number
+  visitConfirmed?: number
+  distinctUserCount?: number
+  minGroupSizeMet?: boolean
+}
+
+export type DestinationMetricsSummary = {
+  destinationId: string
+  cityId: string
+  regionId: string
+  dateRange: string
+  destinationImpressions: number
+  destinationDetailOpens: number
+  itineraryGenerated: number
+  itinerarySaved: number
+  linkClicks: number
+  visitIntentSubmitted: number
+  visitConfirmed: number
+  distinctUserCount: number
+  minGroupSizeMet: boolean
+}

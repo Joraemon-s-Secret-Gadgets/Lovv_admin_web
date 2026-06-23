@@ -5,6 +5,8 @@ import type {
   AdminProposalHistoryResponse,
   AdminProposalRequest,
   AdminProposalResponse,
+  DestinationMetricsSummary,
+  DestinationMetricsSummaryResponse,
   MonthlyDestination,
   MonthlyDestinationAction,
   MonthlyDestinationActionRequest,
@@ -66,6 +68,10 @@ type PublishJobListResponse = {
 
 type PublishJobMutationResponse = {
   job?: PublishJobResponse
+}
+
+type DestinationMetricsSummaryListResponse = {
+  items?: DestinationMetricsSummaryResponse[]
 }
 
 const defaultApiBaseUrl = import.meta.env.VITE_LOVV_API_BASE_URL?.trim() ?? ''
@@ -223,6 +229,16 @@ export function createAdminApiClient(options: AdminApiClientOptions = {}) {
       )
       return adaptPublishJob(payload.job)
     },
+    async listDestinationMetricsSummary(filters: { startDate?: string; endDate?: string; regionId?: string; limit?: number } = {}) {
+      const query = new URLSearchParams()
+      if (filters.startDate) query.set('startDate', filters.startDate)
+      if (filters.endDate) query.set('endDate', filters.endDate)
+      if (filters.regionId) query.set('regionId', filters.regionId)
+      if (filters.limit) query.set('limit', String(filters.limit))
+      const suffix = query.toString() ? `?${query.toString()}` : ''
+      const payload = await request<DestinationMetricsSummaryListResponse>(`/api/v1/admin/metrics/destinations${suffix}`)
+      return (payload.items ?? []).map(adaptDestinationMetricsSummary)
+    },
   }
 }
 
@@ -269,6 +285,28 @@ export function adaptPublishJob(job: PublishJobResponse | undefined): PublishJob
     attemptCount: job?.attemptCount ?? 0,
     lastErrorMessage: job?.lastErrorMessage ?? null,
     updatedAt: job?.updatedAt ?? null,
+  }
+}
+
+export function adaptDestinationMetricsSummary(item: DestinationMetricsSummaryResponse | undefined): DestinationMetricsSummary {
+  const officialClicks = item?.officialLinkClicks ?? 0
+  const partnerClicks = item?.partnerLinkClicks ?? 0
+  const startDate = item?.startDate ?? ''
+  const endDate = item?.endDate ?? ''
+  return {
+    destinationId: item?.monthlyCuratedDestinationId ?? '',
+    cityId: item?.cityId ?? '',
+    regionId: item?.regionId ?? '',
+    dateRange: startDate && endDate ? `${startDate} ~ ${endDate}` : startDate || endDate || '-',
+    destinationImpressions: item?.destinationImpressions ?? 0,
+    destinationDetailOpens: item?.destinationDetailOpens ?? 0,
+    itineraryGenerated: item?.itineraryGenerated ?? 0,
+    itinerarySaved: item?.itinerarySaved ?? 0,
+    linkClicks: officialClicks + partnerClicks,
+    visitIntentSubmitted: item?.visitIntentSubmitted ?? 0,
+    visitConfirmed: item?.visitConfirmed ?? 0,
+    distinctUserCount: item?.distinctUserCount ?? 0,
+    minGroupSizeMet: Boolean(item?.minGroupSizeMet),
   }
 }
 

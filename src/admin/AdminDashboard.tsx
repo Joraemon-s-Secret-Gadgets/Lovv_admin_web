@@ -10,6 +10,7 @@ import type {
   AdminProposalRequest,
   AdminRole,
   AdminTab,
+  DestinationMetricsSummary,
   MonthlyDestination,
   MonthlyDestinationAction,
   MonthlyDestinationStatus,
@@ -106,29 +107,71 @@ function RoleStatusPanel() {
   )
 }
 
-function LocalOperatorMetrics() {
+function LocalOperatorMetrics({
+  items,
+  isLoading,
+  errorMessage,
+  onRefresh,
+}: {
+  items: DestinationMetricsSummary[]
+  isLoading: boolean
+  errorMessage: string | null
+  onRefresh: () => void
+}) {
   return (
     <section className="panel" aria-labelledby="local-metrics-title">
       <div className="section-heading">
         <span className="section-kicker">Local Metrics</span>
         <h2 id="local-metrics-title">담당 지역 데이터 운영 지표 조회</h2>
       </div>
-      <div className="metric-table" role="table" aria-label="담당 지역 운영 지표">
-        <div role="row" className="metric-row metric-row-head">
-          <span role="columnheader">지표</span>
-          <span role="columnheader">현재 값</span>
-          <span role="columnheader">변화</span>
-        </div>
-        {localMetrics.map((metric) => (
-          <div role="row" className="metric-row" key={metric.label}>
-            <span role="cell">{metric.label}</span>
-            <strong role="cell">{metric.value}</strong>
-            <span role="cell" className={metric.trend.startsWith('-') ? 'trend-down' : 'trend-up'}>
-              {metric.trend}
-            </span>
-          </div>
-        ))}
+      <div className="api-status-row">
+        {isLoading && <span role="status">지표를 불러오는 중입니다.</span>}
+        {errorMessage && <span role="alert">{errorMessage}</span>}
+        <button type="button" onClick={onRefresh} disabled={isLoading}>
+          새로고침
+        </button>
       </div>
+      {items.length > 0 ? (
+        <div className="metric-table" role="table" aria-label="담당 지역 운영 지표">
+          <div role="row" className="metric-row metric-row-head">
+            <span role="columnheader">지역/도시</span>
+            <span role="columnheader">노출</span>
+            <span role="columnheader">상세</span>
+            <span role="columnheader">일정</span>
+            <span role="columnheader">저장</span>
+            <span role="columnheader">링크</span>
+            <span role="columnheader">표본</span>
+          </div>
+          {items.map((metric) => (
+            <div role="row" className="metric-row" key={metric.destinationId || `${metric.regionId}-${metric.cityId}`}>
+              <span role="cell">{metric.regionId || metric.cityId || '-'}</span>
+              <strong role="cell">{metric.destinationImpressions}</strong>
+              <span role="cell">{metric.destinationDetailOpens}</span>
+              <span role="cell">{metric.itineraryGenerated}</span>
+              <span role="cell">{metric.itinerarySaved}</span>
+              <span role="cell">{metric.linkClicks}</span>
+              <span role="cell">{metric.minGroupSizeMet ? `${metric.distinctUserCount}명` : '표본 부족'}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="metric-table" role="table" aria-label="담당 지역 운영 지표 예시">
+          <div role="row" className="metric-row metric-row-head">
+            <span role="columnheader">지표</span>
+            <span role="columnheader">현재 값</span>
+            <span role="columnheader">변화</span>
+          </div>
+          {localMetrics.map((metric) => (
+            <div role="row" className="metric-row" key={metric.label}>
+              <span role="cell">{metric.label}</span>
+              <strong role="cell">{metric.value}</strong>
+              <span role="cell" className={metric.trend.startsWith('-') ? 'trend-down' : 'trend-up'}>
+                {metric.trend}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   )
 }
@@ -613,6 +656,23 @@ export function AdminDashboard() {
     [accessToken],
   )
   const authClient = useMemo(() => createAdminAuthClient(), [])
+  const [metricsItems, setMetricsItems] = useState<DestinationMetricsSummary[]>([])
+  const [isMetricsLoading, setIsMetricsLoading] = useState(false)
+  const [metricsError, setMetricsError] = useState<string | null>(null)
+
+  const loadMetrics = useCallback(async () => {
+    setIsMetricsLoading(true)
+    setMetricsError(null)
+    try {
+      const items = await adminApi.listDestinationMetricsSummary({ limit: 10 })
+      setMetricsItems(items)
+    } catch (error) {
+      setMetricsError(error instanceof Error ? error.message : '운영 지표를 불러오지 못했습니다.')
+      setMetricsItems([])
+    } finally {
+      setIsMetricsLoading(false)
+    }
+  }, [adminApi])
 
   // On first load without a cached/dev token, exchange the session cookie for an
   // access token. Failures are swallowed: an unauthenticated visitor simply sees
@@ -637,6 +697,13 @@ export function AdminDashboard() {
       isCurrent = false
     }
   }, [accessToken, authClient])
+
+  useEffect(() => {
+    if (activeTab !== 'metrics' || !currentRole) {
+      return
+    }
+    void loadMetrics()
+  }, [activeTab, currentRole, loadMetrics])
 
   const loadProposals = useCallback(async () => {
     setIsProposalLoading(true)
@@ -906,7 +973,12 @@ export function AdminDashboard() {
             {activeTab === 'metrics' && (
               <div className="stack">
                 <RoleStatusPanel />
-                <LocalOperatorMetrics />
+                <LocalOperatorMetrics
+                  items={metricsItems}
+                  isLoading={isMetricsLoading}
+                  errorMessage={metricsError}
+                  onRefresh={() => void loadMetrics()}
+                />
               </div>
             )}
             {activeTab === 'proposal' && (

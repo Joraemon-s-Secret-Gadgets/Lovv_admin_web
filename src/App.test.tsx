@@ -42,10 +42,25 @@ function jsonResponse(body: unknown, init: ResponseInit = {}) {
   )
 }
 
+function requestUrl(input: RequestInfo | URL) {
+  return typeof input === 'string' ? input : input.toString()
+}
+
+function defaultAdminFetch(input: RequestInfo | URL) {
+  const url = requestUrl(input)
+  if (url.includes('/api/v1/admin/metrics/destinations')) {
+    return jsonResponse({ items: [] })
+  }
+  if (url.includes('/api/v1/admin/data-proposals')) {
+    return jsonResponse({ items: [apiProposal] })
+  }
+  return jsonResponse({ items: [] })
+}
+
 describe('Lovv admin console', () => {
   beforeEach(() => {
     useSessionRole('R-ADMIN')
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ items: [apiProposal] })))
+    vi.stubGlobal('fetch', vi.fn(defaultAdminFetch))
   })
 
   afterEach(() => {
@@ -116,19 +131,41 @@ describe('Lovv admin console', () => {
 
   it('creates a data proposal through the admin API without client-owned authority fields', async () => {
     useSessionRole('R-DATA-PROVIDER')
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ items: [] }))
-      .mockResolvedValueOnce(jsonResponse({ proposal: apiProposal }, { status: 201 }))
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input)
+      if (url.includes('/api/v1/admin/metrics/destinations')) {
+        return jsonResponse({ items: [] })
+      }
+      if (url.endsWith('/api/v1/admin/data-proposals') && init?.method === 'POST') {
+        return jsonResponse({ proposal: apiProposal }, { status: 201 })
+      }
+      if (url.includes('/api/v1/admin/data-proposals')) {
+        return jsonResponse({ items: [] })
+      }
+      return jsonResponse({ items: [] })
+    })
     vi.stubGlobal('fetch', fetchMock)
 
     render(<App />)
     fireEvent.click(screen.getByRole('button', { name: '제안 등록' }))
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
-    const [, createInit] = fetchMock.mock.calls[1]
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input, init]) =>
+          String(input).endsWith('/api/v1/admin/data-proposals') &&
+          (init as RequestInit | undefined)?.method === 'POST',
+        ),
+      ).toBe(true),
+    )
+    const createCall = fetchMock.mock.calls.find(([input, init]) =>
+      String(input).endsWith('/api/v1/admin/data-proposals') &&
+      (init as RequestInit | undefined)?.method === 'POST',
+    )
+    expect(createCall).toBeDefined()
+    const [, createInit] = createCall as [RequestInfo | URL, RequestInit]
     const body = JSON.parse(String(createInit.body))
 
-    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/admin/data-proposals')
+    expect(createCall?.[0]).toBe('/api/v1/admin/data-proposals')
     expect(createInit.method).toBe('POST')
     expect(body).toMatchObject({
       contentType: 'festival',
@@ -157,9 +194,19 @@ describe('Lovv admin console', () => {
   })
 
   it('sends review action requests to the backend API', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ items: [apiProposal] }))
-      .mockResolvedValueOnce(jsonResponse({ proposal: { ...apiProposal, status: 'in_review' } }))
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input)
+      if (url.includes('/api/v1/admin/metrics/destinations')) {
+        return jsonResponse({ items: [] })
+      }
+      if (url.endsWith('/api/v1/admin/data-proposals/proposal-1/review') && init?.method === 'POST') {
+        return jsonResponse({ proposal: { ...apiProposal, status: 'in_review' } })
+      }
+      if (url.includes('/api/v1/admin/data-proposals')) {
+        return jsonResponse({ items: [apiProposal] })
+      }
+      return jsonResponse({ items: [] })
+    })
     vi.stubGlobal('fetch', fetchMock)
 
     render(<App />)
@@ -168,15 +215,23 @@ describe('Lovv admin console', () => {
     expect(within(queue).getByText('강릉 커피축제 공식 정보 갱신')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '검토 시작' }))
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
-    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/admin/data-proposals/proposal-1/review')
-    expect(fetchMock.mock.calls[1][1].method).toBe('POST')
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input, init]) =>
+          String(input).endsWith('/api/v1/admin/data-proposals/proposal-1/review') &&
+          (init as RequestInit | undefined)?.method === 'POST',
+        ),
+      ).toBe(true),
+    )
+    const reviewCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).endsWith('/api/v1/admin/data-proposals/proposal-1/review'),
+    )
+    expect(reviewCall?.[0]).toBe('/api/v1/admin/data-proposals/proposal-1/review')
+    expect((reviewCall?.[1] as RequestInit).method).toBe('POST')
   })
 
   it('loads proposal history through the admin API', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ items: [apiProposal] }))
-      .mockResolvedValueOnce(jsonResponse({
+    const historyResponse = {
         items: [
           {
             historyId: 'history-1',
@@ -189,7 +244,20 @@ describe('Lovv admin console', () => {
             createdAt: '2026-06-23T09:00:00Z',
           },
         ],
-      }))
+      }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = requestUrl(input)
+      if (url.includes('/api/v1/admin/metrics/destinations')) {
+        return jsonResponse({ items: [] })
+      }
+      if (url.endsWith('/api/v1/admin/data-proposals/proposal-1/history')) {
+        return jsonResponse(historyResponse)
+      }
+      if (url.includes('/api/v1/admin/data-proposals')) {
+        return jsonResponse({ items: [apiProposal] })
+      }
+      return jsonResponse({ items: [] })
+    })
     vi.stubGlobal('fetch', fetchMock)
 
     render(<App />)
@@ -198,18 +266,26 @@ describe('Lovv admin console', () => {
     fireEvent.click(screen.getByRole('button', { name: '이력 조회' }))
 
     expect(await screen.findByLabelText('제안 변경 이력')).toHaveTextContent('submitted')
-    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/admin/data-proposals/proposal-1/history')
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith('/api/v1/admin/data-proposals/proposal-1/history'),
+      ),
+    ).toBe(true)
   })
 
   it('shows API errors instead of falling back to mock proposal rows', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(
-        jsonResponse(
+      vi.fn((input: RequestInfo | URL) => {
+        const url = requestUrl(input)
+        if (url.includes('/api/v1/admin/metrics/destinations')) {
+          return jsonResponse({ items: [] })
+        }
+        return jsonResponse(
           { error: { code: 'UNAUTHORIZED', message: 'Authentication is required' } },
           { status: 401 },
-        ),
-      ),
+        )
+      }),
     )
 
     render(<App />)
