@@ -7,9 +7,13 @@ import { createAdminApiClient, createAdminAuthClient } from './adminApi'
 import { localMetrics, proposalDraft, roleLanes, summaryMetrics } from './adminData'
 import { getSessionRoles, getStoredAccessToken, resolvePrimaryRole, storeAccessToken } from './session'
 import type {
+  AdminNotice,
+  AdminNoticeAction,
+  AdminNoticeRequest,
   AdminProposalRequest,
   AdminRole,
   AdminTab,
+  AuditLogEntry,
   DestinationMetricsSummary,
   MonthlyDestination,
   MonthlyDestinationAction,
@@ -20,6 +24,9 @@ import type {
   PublishJobAction,
   PublishJobStatus,
   PublishJobType,
+  RecommendationPolicy,
+  RecommendationPolicyAction,
+  RecommendationPolicyRequest,
   ReviewProposal,
   RoleTabPermissions,
   SummaryMetric,
@@ -30,6 +37,8 @@ const tabs: { id: AdminTab; label: string }[] = [
   { id: 'proposal', label: '데이터 제안' },
   { id: 'review', label: '제안 검토' },
   { id: 'publish', label: '반영 상태' },
+  { id: 'operations', label: '공지·정책' },
+  { id: 'audit', label: '감사 로그' },
 ]
 
 // Which tabs each role may open. Mirrors the backend role matrix; the server is
@@ -37,7 +46,7 @@ const tabs: { id: AdminTab; label: string }[] = [
 const roleTabPermissions: RoleTabPermissions = {
   'R-LOCAL-OPERATOR': ['metrics'],
   'R-DATA-PROVIDER': ['proposal'],
-  'R-ADMIN': ['metrics', 'review', 'publish'],
+  'R-ADMIN': ['metrics', 'review', 'publish', 'operations', 'audit'],
 }
 
 const roleDefaultTab: Record<AdminRole, AdminTab> = {
@@ -107,6 +116,57 @@ function RoleStatusPanel() {
   )
 }
 
+function formatDashboardNumber(value: number) {
+  return new Intl.NumberFormat('ko-KR').format(value)
+}
+
+function formatDashboardRate(part: number, total: number) {
+  if (total <= 0) {
+    return '0%'
+  }
+  return `${Math.round((part / total) * 100)}%`
+}
+
+// Sum one numeric field across every metrics row.
+function sumMetric(items: DestinationMetricsSummary[], pick: (item: DestinationMetricsSummary) => number) {
+  return items.reduce((total, item) => total + pick(item), 0)
+}
+
+// Roll up the per-destination metric rows into the local-operator dashboard
+// totals. Official and partner link clicks are kept separate (step 14) and also
+// summed; sampleReadyCount counts only rows that met the k-anonymity threshold.
+function buildLocalOperatorDashboard(items: DestinationMetricsSummary[]) {
+  const destinationCount = items.length
+  const totalImpressions = sumMetric(items, (item) => item.destinationImpressions)
+  const totalDetailOpens = sumMetric(items, (item) => item.destinationDetailOpens)
+  const totalItineraryGenerated = sumMetric(items, (item) => item.itineraryGenerated)
+  const totalSaved = sumMetric(items, (item) => item.itinerarySaved)
+  const totalOfficialLinkClicks = sumMetric(items, (item) => item.officialLinkClicks)
+  const totalPartnerLinkClicks = sumMetric(items, (item) => item.partnerLinkClicks)
+  const totalLinkClicks = totalOfficialLinkClicks + totalPartnerLinkClicks
+  const totalVisitIntent = sumMetric(items, (item) => item.visitIntentSubmitted)
+  const totalVisitConfirmed = sumMetric(items, (item) => item.visitConfirmed)
+  const sampleReadyCount = items.filter((item) => item.minGroupSizeMet).length
+  const topDestination = [...items].sort((a, b) => b.destinationImpressions - a.destinationImpressions)[0]
+
+  return {
+    destinationCount,
+    totalImpressions,
+    totalDetailOpens,
+    totalItineraryGenerated,
+    totalSaved,
+    totalOfficialLinkClicks,
+    totalPartnerLinkClicks,
+    totalLinkClicks,
+    totalVisitIntent,
+    totalVisitConfirmed,
+    sampleReadyCount,
+    topDestination,
+  }
+}
+
+// Region-scoped metrics dashboard for local operators: KPI totals plus the
+// official/partner link split and a top-destination highlight.
 function LocalOperatorMetrics({
   items,
   isLoading,
@@ -118,6 +178,8 @@ function LocalOperatorMetrics({
   errorMessage: string | null
   onRefresh: () => void
 }) {
+  const dashboard = buildLocalOperatorDashboard(items)
+
   return (
     <section className="panel" aria-labelledby="local-metrics-title">
       <div className="section-heading">
@@ -132,28 +194,81 @@ function LocalOperatorMetrics({
         </button>
       </div>
       {items.length > 0 ? (
-        <div className="metric-table" role="table" aria-label="담당 지역 운영 지표">
-          <div role="row" className="metric-row metric-row-head">
-            <span role="columnheader">지역/도시</span>
-            <span role="columnheader">노출</span>
-            <span role="columnheader">상세</span>
-            <span role="columnheader">일정</span>
-            <span role="columnheader">저장</span>
-            <span role="columnheader">링크</span>
-            <span role="columnheader">표본</span>
-          </div>
-          {items.map((metric) => (
-            <div role="row" className="metric-row" key={metric.destinationId || `${metric.regionId}-${metric.cityId}`}>
-              <span role="cell">{metric.regionId || metric.cityId || '-'}</span>
-              <strong role="cell">{metric.destinationImpressions}</strong>
-              <span role="cell">{metric.destinationDetailOpens}</span>
-              <span role="cell">{metric.itineraryGenerated}</span>
-              <span role="cell">{metric.itinerarySaved}</span>
-              <span role="cell">{metric.linkClicks}</span>
-              <span role="cell">{metric.minGroupSizeMet ? `${metric.distinctUserCount}명` : '표본 부족'}</span>
+        <>
+          <section className="local-dashboard-grid" aria-label="지역 운영자 집계 대시보드">
+            <article className="local-dashboard-card">
+              <span>총 노출</span>
+              <strong>{formatDashboardNumber(dashboard.totalImpressions)}</strong>
+              <p>
+                {dashboard.destinationCount}개 후보 · 상위{' '}
+                {dashboard.topDestination?.regionId || dashboard.topDestination?.cityId || '-'}
+              </p>
+            </article>
+            <article className="local-dashboard-card">
+              <span>관심 행동</span>
+              <strong>{formatDashboardNumber(dashboard.totalItineraryGenerated)}</strong>
+              <p>
+                상세 {formatDashboardNumber(dashboard.totalDetailOpens)} · 저장{' '}
+                {formatDashboardNumber(dashboard.totalSaved)}
+              </p>
+            </article>
+            <article className="local-dashboard-card">
+              <span>저장 전환율</span>
+              <strong>{formatDashboardRate(dashboard.totalSaved, dashboard.totalDetailOpens)}</strong>
+              <p>상세 열람 대비 저장 행동 기준</p>
+            </article>
+            <article className="local-dashboard-card">
+              <span>링크 클릭</span>
+              <strong>{formatDashboardNumber(dashboard.totalLinkClicks)}</strong>
+              <p>
+                공식 {formatDashboardNumber(dashboard.totalOfficialLinkClicks)} / 제휴{' '}
+                {formatDashboardNumber(dashboard.totalPartnerLinkClicks)}
+              </p>
+            </article>
+            <article className="local-dashboard-card">
+              <span>방문 의향</span>
+              <strong>{formatDashboardNumber(dashboard.totalVisitIntent)}</strong>
+              <p>확정 {formatDashboardNumber(dashboard.totalVisitConfirmed)}건</p>
+            </article>
+            <article className="local-dashboard-card">
+              <span>표본 충족</span>
+              <strong>
+                {dashboard.sampleReadyCount}/{dashboard.destinationCount}
+              </strong>
+              <p>최소 집계 기준을 충족한 후보</p>
+            </article>
+          </section>
+          <div className="metric-table" role="table" aria-label="담당 지역 운영 지표">
+            <div role="row" className="metric-row metric-row-head metric-row-wide">
+              <span role="columnheader">지역/도시</span>
+              <span role="columnheader">노출</span>
+              <span role="columnheader">상세</span>
+              <span role="columnheader">일정</span>
+              <span role="columnheader">저장</span>
+              <span role="columnheader">공식 링크</span>
+              <span role="columnheader">제휴 링크</span>
+              <span role="columnheader">링크 합계</span>
+              <span role="columnheader">표본</span>
             </div>
-          ))}
-        </div>
+            {items.map((metric) => (
+              <div
+                role="row"
+                className="metric-row metric-row-wide"
+                key={metric.destinationId || `${metric.regionId}-${metric.cityId}`}
+              >
+                <span role="cell">{metric.regionId || metric.cityId || '-'}</span>
+                <strong role="cell">{metric.destinationImpressions}</strong>
+                <span role="cell">{metric.destinationDetailOpens}</span>
+                <span role="cell">{metric.itineraryGenerated}</span>
+                <span role="cell">{metric.itinerarySaved}</span>
+                <span role="cell">{metric.officialLinkClicks}</span>
+                <span role="cell">{metric.partnerLinkClicks}</span>
+                <span role="cell">{metric.linkClicks}</span>
+                <span role="cell">{metric.minGroupSizeMet ? `${metric.distinctUserCount}명` : '표본 부족'}</span>
+              </div>
+            ))}
+          </div>
+        </>
       ) : (
         <div className="metric-table" role="table" aria-label="담당 지역 운영 지표 예시">
           <div role="row" className="metric-row metric-row-head">
@@ -188,6 +303,189 @@ function NoSessionRolePanel() {
         <code> VITE_LOVV_ADMIN_ACCESS_TOKEN </code>
         값을 확인해 주세요. 권한 판단은 백엔드에서 다시 검증됩니다.
       </p>
+    </section>
+  )
+}
+
+const auditResultLabels: Record<AuditLogEntry['result'], string> = {
+  allowed: '허용',
+  denied: '거부',
+  succeeded: '성공',
+  failed: '실패',
+}
+
+// 감사 로그 tab: read-only audit trail (most recent admin mutations) and the
+// console's primary monitoring surface.
+function AuditLogPanel({
+  entries,
+  isLoading,
+  errorMessage,
+  onRefresh,
+}: {
+  entries: AuditLogEntry[]
+  isLoading: boolean
+  errorMessage: string | null
+  onRefresh: () => void
+}) {
+  return (
+    <section className="panel" aria-labelledby="audit-title">
+      <div className="section-heading">
+        <span className="section-kicker">Audit Trail</span>
+        <h2 id="audit-title">감사 로그</h2>
+        <button type="button" className="ghost-button" onClick={onRefresh} disabled={isLoading}>
+          새로고침
+        </button>
+      </div>
+      {errorMessage ? (
+        <p role="alert" className="error-text">
+          {errorMessage}
+        </p>
+      ) : null}
+      {isLoading ? (
+        <p>감사 로그를 불러오는 중입니다.</p>
+      ) : entries.length === 0 ? (
+        <p>기록된 감사 로그가 없습니다.</p>
+      ) : (
+        <table aria-label="감사 로그 목록">
+          <thead>
+            <tr>
+              <th scope="col">시각</th>
+              <th scope="col">행위자</th>
+              <th scope="col">액션</th>
+              <th scope="col">대상</th>
+              <th scope="col">결과</th>
+            </tr>
+          </thead>
+          <tbody>
+            {entries.map((entry) => (
+              <tr key={entry.id}>
+                <td>{entry.occurredAt ?? '-'}</td>
+                <td>{entry.actorUserId ?? '-'}</td>
+                <td>{entry.action}</td>
+                <td>
+                  {entry.resourceType ?? '-'}
+                  {entry.resourceId ? ` · ${entry.resourceId}` : ''}
+                </td>
+                <td>
+                  <span className={`status-pill status-${entry.result}`}>{auditResultLabels[entry.result]}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  )
+}
+
+// 공지·정책 tab: side-by-side notice and recommendation-policy cards with
+// create + lifecycle (publish/activate/archive) actions for R-ADMIN.
+function OperationsPolicyPanel({
+  notices,
+  policies,
+  isLoading,
+  errorMessage,
+  onRefresh,
+  onCreateNotice,
+  onTransitionNotice,
+  onCreatePolicy,
+  onTransitionPolicy,
+}: {
+  notices: AdminNotice[]
+  policies: RecommendationPolicy[]
+  isLoading: boolean
+  errorMessage: string | null
+  onRefresh: () => void
+  onCreateNotice: () => void
+  onTransitionNotice: (noticeId: string, action: AdminNoticeAction) => void
+  onCreatePolicy: () => void
+  onTransitionPolicy: (policyId: string, action: RecommendationPolicyAction) => void
+}) {
+  return (
+    <section className="panel" aria-labelledby="operations-title">
+      <div className="section-heading">
+        <span className="section-kicker">R-ADMIN</span>
+        <h2 id="operations-title">공지·추천 정책 관리</h2>
+      </div>
+      <div className="api-status-row">
+        {isLoading && <span role="status">공지와 추천 정책을 불러오는 중입니다.</span>}
+        {errorMessage && <span role="alert">{errorMessage}</span>}
+        <button type="button" onClick={onRefresh} disabled={isLoading}>
+          새로고침
+        </button>
+        <button type="button" onClick={onCreateNotice} disabled={isLoading}>
+          공지 초안 생성
+        </button>
+        <button type="button" onClick={onCreatePolicy} disabled={isLoading}>
+          추천 정책 초안 생성
+        </button>
+      </div>
+      <div className="operations-grid">
+        <article className="operations-card" aria-labelledby="notices-title">
+          <h3 id="notices-title">운영 공지</h3>
+          {notices.length === 0 ? (
+            <p className="empty-state">등록된 공지가 없습니다.</p>
+          ) : (
+            <ul className="operations-list">
+              {notices.map((notice) => (
+                <li key={notice.id}>
+                  <div>
+                    <strong>{notice.title}</strong>
+                    <p>{notice.body}</p>
+                    <span>
+                      {notice.audience} · {notice.severity} · {notice.status}
+                    </span>
+                  </div>
+                  <div className="inline-actions">
+                    {notice.status !== 'published' && (
+                      <button type="button" onClick={() => onTransitionNotice(notice.id, 'publish')}>
+                        게시
+                      </button>
+                    )}
+                    {notice.status !== 'archived' && (
+                      <button type="button" onClick={() => onTransitionNotice(notice.id, 'archive')}>
+                        보관
+                      </button>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </article>
+        <article className="operations-card" aria-labelledby="policies-title">
+          <h3 id="policies-title">추천 정책</h3>
+          {policies.length === 0 ? (
+            <p className="empty-state">등록된 추천 정책이 없습니다.</p>
+          ) : (
+            <ul className="operations-list">
+              {policies.map((policy) => (
+                <li key={policy.id}>
+                  <div>
+                    <strong>{policy.title}</strong>
+                    <p>{policy.description || policy.policyKey}</p>
+                    <span>
+                      우선순위 {policy.priority} · {policy.status}
+                    </span>
+                  </div>
+                  <div className="inline-actions">
+                    {policy.status !== 'active' && (
+                      <button type="button" onClick={() => onTransitionPolicy(policy.id, 'activate')}>
+                        활성
+                      </button>
+                    )}
+                    {policy.status !== 'archived' && (
+                      <button type="button" onClick={() => onTransitionPolicy(policy.id, 'archive')}>
+                        보관
+                      </button>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </article>
+      </div>
     </section>
   )
 }
@@ -489,6 +787,8 @@ type MonthlyDestinationPanelProps = {
   onJobTransition: (jobId: string, action: PublishJobAction) => void
 }
 
+// 반영 상태 tab: the monthly curated destination list with admin publish-state
+// controls and an expandable per-destination reflection-job history.
 function MonthlyDestinationPanel({
   items,
   isLoading,
@@ -659,6 +959,13 @@ export function AdminDashboard() {
   const [metricsItems, setMetricsItems] = useState<DestinationMetricsSummary[]>([])
   const [isMetricsLoading, setIsMetricsLoading] = useState(false)
   const [metricsError, setMetricsError] = useState<string | null>(null)
+  const [notices, setNotices] = useState<AdminNotice[]>([])
+  const [policies, setPolicies] = useState<RecommendationPolicy[]>([])
+  const [isOperationsLoading, setIsOperationsLoading] = useState(false)
+  const [operationsError, setOperationsError] = useState<string | null>(null)
+  const [auditEntries, setAuditEntries] = useState<AuditLogEntry[]>([])
+  const [isAuditLoading, setIsAuditLoading] = useState(false)
+  const [auditError, setAuditError] = useState<string | null>(null)
 
   const loadMetrics = useCallback(async () => {
     setIsMetricsLoading(true)
@@ -673,6 +980,117 @@ export function AdminDashboard() {
       setIsMetricsLoading(false)
     }
   }, [adminApi])
+
+  const loadOperations = useCallback(async () => {
+    setIsOperationsLoading(true)
+    setOperationsError(null)
+    try {
+      const [noticeItems, policyItems] = await Promise.all([
+        adminApi.listNotices({ limit: 20 }),
+        adminApi.listRecommendationPolicies({ limit: 20 }),
+      ])
+      setNotices(noticeItems)
+      setPolicies(policyItems)
+    } catch (error) {
+      setOperationsError(error instanceof Error ? error.message : '공지와 추천 정책을 불러오지 못했습니다.')
+      setNotices([])
+      setPolicies([])
+    } finally {
+      setIsOperationsLoading(false)
+    }
+  }, [adminApi])
+
+  const loadAudit = useCallback(async () => {
+    setIsAuditLoading(true)
+    setAuditError(null)
+    try {
+      const items = await adminApi.listAuditLogs({ limit: 50 })
+      setAuditEntries(items)
+    } catch (error) {
+      setAuditError(error instanceof Error ? error.message : '감사 로그를 불러오지 못했습니다.')
+      setAuditEntries([])
+    } finally {
+      setIsAuditLoading(false)
+    }
+  }, [adminApi])
+
+  const handleCreateNotice = useCallback(async () => {
+    setIsOperationsLoading(true)
+    setOperationsError(null)
+    // TODO(operations): PoC placeholder content. Replace with a notice form
+    // (title/body/audience/severity inputs) before production use.
+    const request: AdminNoticeRequest = {
+      title: '추천 데이터 반영 일정 안내',
+      body: '승인된 월간 여행지 후보가 추천 캐시에 반영되는 운영 일정을 공지합니다.',
+      audience: 'admin',
+      severity: 'info',
+    }
+    try {
+      await adminApi.createNotice(request)
+      await loadOperations()
+    } catch (error) {
+      setOperationsError(error instanceof Error ? error.message : '공지 초안 생성에 실패했습니다.')
+    } finally {
+      setIsOperationsLoading(false)
+    }
+  }, [adminApi, loadOperations])
+
+  const handleTransitionNotice = useCallback(
+    async (noticeId: string, action: AdminNoticeAction) => {
+      setIsOperationsLoading(true)
+      setOperationsError(null)
+      try {
+        await adminApi.transitionNotice(noticeId, action)
+        await loadOperations()
+      } catch (error) {
+        setOperationsError(error instanceof Error ? error.message : '공지 상태 변경에 실패했습니다.')
+      } finally {
+        setIsOperationsLoading(false)
+      }
+    },
+    [adminApi, loadOperations],
+  )
+
+  const handleCreatePolicy = useCallback(async () => {
+    setIsOperationsLoading(true)
+    setOperationsError(null)
+    // TODO(operations): PoC placeholder content. Replace with a policy form
+    // (key/title/priority/rules inputs) before production use.
+    const request: RecommendationPolicyRequest = {
+      policyKey: 'small_city_balance',
+      title: '소도시 노출 균형 정책',
+      description: '품질 점수가 비슷한 후보에서는 과소 노출 소도시를 우선 고려합니다.',
+      priority: 80,
+      rules: {
+        underExposedBoost: 0.15,
+        maxSameRegionShare: 0.35,
+      },
+    }
+    try {
+      await adminApi.createRecommendationPolicy(request)
+      await loadOperations()
+    } catch (error) {
+      setOperationsError(error instanceof Error ? error.message : '추천 정책 초안 생성에 실패했습니다.')
+    } finally {
+      setIsOperationsLoading(false)
+    }
+  }, [adminApi, loadOperations])
+
+  const handleTransitionPolicy = useCallback(
+    async (policyId: string, action: RecommendationPolicyAction) => {
+      setIsOperationsLoading(true)
+      setOperationsError(null)
+      try {
+        await adminApi.transitionRecommendationPolicy(policyId, action)
+        await loadOperations()
+      } catch (error) {
+        setOperationsError(error instanceof Error ? error.message : '추천 정책 상태 변경에 실패했습니다.')
+      } finally {
+        setIsOperationsLoading(false)
+      }
+    },
+    [adminApi, loadOperations],
+  )
 
   // On first load without a cached/dev token, exchange the session cookie for an
   // access token. Failures are swallowed: an unauthenticated visitor simply sees
@@ -704,6 +1122,21 @@ export function AdminDashboard() {
     }
     void loadMetrics()
   }, [activeTab, currentRole, loadMetrics])
+
+  useEffect(() => {
+    if (activeTab !== 'operations' || currentRole !== 'R-ADMIN') {
+      return
+    }
+    void loadOperations()
+  }, [activeTab, currentRole, loadOperations])
+
+  // Load the audit trail lazily, only when an admin opens the 감사 로그 tab.
+  useEffect(() => {
+    if (activeTab !== 'audit' || currentRole !== 'R-ADMIN') {
+      return
+    }
+    void loadAudit()
+  }, [activeTab, currentRole, loadAudit])
 
   const loadProposals = useCallback(async () => {
     setIsProposalLoading(true)
@@ -1020,6 +1453,27 @@ export function AdminDashboard() {
                 isJobMutating={isJobMutating}
                 onLoadJobs={(destinationId) => void loadPublishJobs(destinationId)}
                 onJobTransition={(jobId, action) => void handleJobTransition(jobId, action)}
+              />
+            )}
+            {activeTab === 'operations' && (
+              <OperationsPolicyPanel
+                notices={notices}
+                policies={policies}
+                isLoading={isOperationsLoading}
+                errorMessage={operationsError}
+                onRefresh={() => void loadOperations()}
+                onCreateNotice={() => void handleCreateNotice()}
+                onTransitionNotice={(noticeId, action) => void handleTransitionNotice(noticeId, action)}
+                onCreatePolicy={() => void handleCreatePolicy()}
+                onTransitionPolicy={(policyId, action) => void handleTransitionPolicy(policyId, action)}
+              />
+            )}
+            {activeTab === 'audit' && (
+              <AuditLogPanel
+                entries={auditEntries}
+                isLoading={isAuditLoading}
+                errorMessage={auditError}
+                onRefresh={() => void loadAudit()}
               />
             )}
           </>

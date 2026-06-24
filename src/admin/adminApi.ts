@@ -3,6 +3,10 @@
 // It deliberately never sends ownership/role fields — the server derives those.
 import type {
   AdminProposalHistoryResponse,
+  AdminNotice,
+  AdminNoticeAction,
+  AdminNoticeRequest,
+  AdminNoticeResponse,
   AdminProposalRequest,
   AdminProposalResponse,
   DestinationMetricsSummary,
@@ -12,11 +16,17 @@ import type {
   MonthlyDestinationActionRequest,
   MonthlyDestinationPromoteRequest,
   MonthlyDestinationResponse,
+  AuditLogEntry,
+  AuditLogResponse,
   ProposalHistoryItem,
   PublishJob,
   PublishJobAction,
   PublishJobActionRequest,
   PublishJobResponse,
+  RecommendationPolicy,
+  RecommendationPolicyAction,
+  RecommendationPolicyRequest,
+  RecommendationPolicyResponse,
   ReviewProposal,
 } from './types'
 
@@ -70,12 +80,35 @@ type PublishJobMutationResponse = {
   job?: PublishJobResponse
 }
 
+type AuditLogListResponse = {
+  items?: AuditLogResponse[]
+}
+
 type DestinationMetricsSummaryListResponse = {
   items?: DestinationMetricsSummaryResponse[]
 }
 
+type AdminNoticeListResponse = {
+  items?: AdminNoticeResponse[]
+}
+
+type AdminNoticeMutationResponse = {
+  notice?: AdminNoticeResponse
+}
+
+type RecommendationPolicyListResponse = {
+  items?: RecommendationPolicyResponse[]
+}
+
+type RecommendationPolicyMutationResponse = {
+  policy?: RecommendationPolicyResponse
+}
+
 const defaultApiBaseUrl = import.meta.env.VITE_LOVV_API_BASE_URL?.trim() ?? ''
 const defaultDevAccessToken = import.meta.env.VITE_LOVV_ADMIN_ACCESS_TOKEN?.trim() ?? ''
+// Default page size for list endpoints. Sent explicitly (not relying on the
+// backend default) so the client controls how many rows a tab renders.
+const DEFAULT_LIMIT = 50
 
 export class AdminApiError extends Error {
   status: number
@@ -178,7 +211,7 @@ export function createAdminApiClient(options: AdminApiClientOptions = {}) {
       if (filters.month) query.set('month', filters.month)
       if (filters.regionId) query.set('regionId', filters.regionId)
       if (filters.status) query.set('status', filters.status)
-      if (filters.limit) query.set('limit', String(filters.limit))
+      query.set('limit', String(filters.limit ?? DEFAULT_LIMIT))
       const suffix = query.toString() ? `?${query.toString()}` : ''
       const payload = await request<MonthlyDestinationListResponse>(`/api/v1/admin/monthly-destinations${suffix}`)
       return (payload.items ?? []).map(adaptMonthlyDestination)
@@ -208,9 +241,10 @@ export function createAdminApiClient(options: AdminApiClientOptions = {}) {
       return adaptMonthlyDestination(payload.destination)
     },
     // Reflection history for a published destination (the publish jobs trail).
-    async listDestinationPublishJobs(destinationId: string) {
+    async listDestinationPublishJobs(destinationId: string, filters: { limit?: number } = {}) {
+      const query = new URLSearchParams({ limit: String(filters.limit ?? DEFAULT_LIMIT) })
       const payload = await request<PublishJobListResponse>(
-        `/api/v1/admin/monthly-destinations/${encodeURIComponent(destinationId)}/publish-jobs`,
+        `/api/v1/admin/monthly-destinations/${encodeURIComponent(destinationId)}/publish-jobs?${query.toString()}`,
       )
       return (payload.items ?? []).map(adaptPublishJob)
     },
@@ -229,15 +263,74 @@ export function createAdminApiClient(options: AdminApiClientOptions = {}) {
       )
       return adaptPublishJob(payload.job)
     },
+    // Aggregate metrics per destination over a date range (B2G-safe daily counters).
     async listDestinationMetricsSummary(filters: { startDate?: string; endDate?: string; regionId?: string; limit?: number } = {}) {
       const query = new URLSearchParams()
       if (filters.startDate) query.set('startDate', filters.startDate)
       if (filters.endDate) query.set('endDate', filters.endDate)
       if (filters.regionId) query.set('regionId', filters.regionId)
-      if (filters.limit) query.set('limit', String(filters.limit))
+      query.set('limit', String(filters.limit ?? DEFAULT_LIMIT))
       const suffix = query.toString() ? `?${query.toString()}` : ''
       const payload = await request<DestinationMetricsSummaryListResponse>(`/api/v1/admin/metrics/destinations${suffix}`)
       return (payload.items ?? []).map(adaptDestinationMetricsSummary)
+    },
+    // Operator notices CRUD + draft/published/archived transitions (step 16).
+    async listNotices(filters: { status?: string; limit?: number } = {}) {
+      const query = new URLSearchParams()
+      if (filters.status) query.set('status', filters.status)
+      query.set('limit', String(filters.limit ?? DEFAULT_LIMIT))
+      const suffix = query.toString() ? `?${query.toString()}` : ''
+      const payload = await request<AdminNoticeListResponse>(`/api/v1/admin/notices${suffix}`)
+      return (payload.items ?? []).map(adaptAdminNotice)
+    },
+    async createNotice(input: AdminNoticeRequest) {
+      const payload = await request<AdminNoticeMutationResponse>('/api/v1/admin/notices', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      })
+      return adaptAdminNotice(payload.notice)
+    },
+    async transitionNotice(noticeId: string, action: AdminNoticeAction) {
+      const payload = await request<AdminNoticeMutationResponse>(
+        `/api/v1/admin/notices/${encodeURIComponent(noticeId)}/${action}`,
+        { method: 'POST', body: JSON.stringify({}) },
+      )
+      return adaptAdminNotice(payload.notice)
+    },
+    // Recommendation policies CRUD + draft/active/archived transitions (step 16).
+    async listRecommendationPolicies(filters: { status?: string; limit?: number } = {}) {
+      const query = new URLSearchParams()
+      if (filters.status) query.set('status', filters.status)
+      query.set('limit', String(filters.limit ?? DEFAULT_LIMIT))
+      const suffix = query.toString() ? `?${query.toString()}` : ''
+      const payload = await request<RecommendationPolicyListResponse>(`/api/v1/admin/recommendation-policies${suffix}`)
+      return (payload.items ?? []).map(adaptRecommendationPolicy)
+    },
+    async createRecommendationPolicy(input: RecommendationPolicyRequest) {
+      const payload = await request<RecommendationPolicyMutationResponse>('/api/v1/admin/recommendation-policies', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      })
+      return adaptRecommendationPolicy(payload.policy)
+    },
+    async transitionRecommendationPolicy(policyId: string, action: RecommendationPolicyAction) {
+      const payload = await request<RecommendationPolicyMutationResponse>(
+        `/api/v1/admin/recommendation-policies/${encodeURIComponent(policyId)}/${action}`,
+        { method: 'POST', body: JSON.stringify({}) },
+      )
+      return adaptRecommendationPolicy(payload.policy)
+    },
+    // Read-only audit trail (admin-only). Filters: action/resourceType/result/actorUserId.
+    async listAuditLogs(filters: { action?: string; resourceType?: string; result?: string; actorUserId?: string; limit?: number } = {}) {
+      const query = new URLSearchParams()
+      if (filters.action) query.set('action', filters.action)
+      if (filters.resourceType) query.set('resourceType', filters.resourceType)
+      if (filters.result) query.set('result', filters.result)
+      if (filters.actorUserId) query.set('actorUserId', filters.actorUserId)
+      query.set('limit', String(filters.limit ?? DEFAULT_LIMIT))
+      const suffix = query.toString() ? `?${query.toString()}` : ''
+      const payload = await request<AuditLogListResponse>(`/api/v1/admin/audit-logs${suffix}`)
+      return (payload.items ?? []).map(adaptAuditLog)
     },
   }
 }
@@ -264,6 +357,8 @@ export function adaptAdminProposal(proposal: AdminProposalResponse | undefined):
 export function adaptMonthlyDestination(destination: MonthlyDestinationResponse | undefined): MonthlyDestination {
   return {
     id: destination?.id ?? '',
+    // Intentional || (not ??): empty strings should also fall through to the next
+    // candidate, so a blank cityName uses cityId/regionId before the '미지정' default.
     cityName: destination?.cityName || destination?.cityId || destination?.regionId || '미지정',
     regionId: destination?.regionId ?? '',
     curationMonth: destination?.curationMonth ?? '',
@@ -302,11 +397,50 @@ export function adaptDestinationMetricsSummary(item: DestinationMetricsSummaryRe
     destinationDetailOpens: item?.destinationDetailOpens ?? 0,
     itineraryGenerated: item?.itineraryGenerated ?? 0,
     itinerarySaved: item?.itinerarySaved ?? 0,
+    officialLinkClicks: officialClicks,
+    partnerLinkClicks: partnerClicks,
     linkClicks: officialClicks + partnerClicks,
     visitIntentSubmitted: item?.visitIntentSubmitted ?? 0,
     visitConfirmed: item?.visitConfirmed ?? 0,
     distinctUserCount: item?.distinctUserCount ?? 0,
     minGroupSizeMet: Boolean(item?.minGroupSizeMet),
+  }
+}
+
+export function adaptAdminNotice(item: AdminNoticeResponse | undefined): AdminNotice {
+  return {
+    id: item?.id ?? '',
+    title: item?.title ?? '제목 없음',
+    body: item?.body ?? '',
+    audience: item?.audience ?? 'all',
+    severity: item?.severity ?? 'info',
+    status: item?.status ?? 'draft',
+    updatedAt: item?.updatedAt ?? null,
+  }
+}
+
+export function adaptRecommendationPolicy(item: RecommendationPolicyResponse | undefined): RecommendationPolicy {
+  return {
+    id: item?.id ?? '',
+    policyKey: item?.policyKey ?? '',
+    title: item?.title ?? '정책명 없음',
+    description: item?.description ?? null,
+    rules: item?.rules ?? {},
+    priority: item?.priority ?? 0,
+    status: item?.status ?? 'draft',
+    updatedAt: item?.updatedAt ?? null,
+  }
+}
+
+export function adaptAuditLog(entry: AuditLogResponse | undefined): AuditLogEntry {
+  return {
+    id: entry?.id ?? '',
+    occurredAt: entry?.occurredAt ?? null,
+    actorUserId: entry?.actorUserId ?? null,
+    action: entry?.action ?? '',
+    resourceType: entry?.resourceType ?? null,
+    resourceId: entry?.resourceId ?? null,
+    result: entry?.result ?? 'succeeded',
   }
 }
 
@@ -352,6 +486,9 @@ export function createAdminAuthClient(options: Omit<AdminApiClientOptions, 'acce
       const payload = await readJson(response)
 
       if (!response.ok) {
+        // Backend contract (shared/http.error_response): every error is
+        // { "error": { "code", "message" } }, used consistently by the auth
+        // handler too. The typeof guards still fail safe if that ever changes.
         const error = payload?.error ?? {}
         throw new AdminApiError(
           response.status,
