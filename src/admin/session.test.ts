@@ -50,7 +50,7 @@ describe('session access-token storage', () => {
     vi.unstubAllEnvs()
   })
 
-  it('round-trips the access token through localStorage', () => {
+  it('round-trips the access token in memory', () => {
     expect(getStoredAccessToken()).toBe('')
     storeAccessToken('header.payload.sig')
     expect(getStoredAccessToken()).toBe('header.payload.sig')
@@ -58,14 +58,6 @@ describe('session access-token storage', () => {
     expect(getStoredAccessToken()).toBe('')
   })
 
-  it('degrades to an empty token when storage throws', () => {
-    const brokenStorage = {
-      getItem: () => {
-        throw new Error('blocked')
-      },
-    } as unknown as Storage
-    expect(getStoredAccessToken(brokenStorage)).toBe('')
-  })
 })
 
 describe('getSessionRoles precedence', () => {

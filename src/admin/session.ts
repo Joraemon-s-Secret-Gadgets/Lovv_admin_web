@@ -8,10 +8,12 @@ const KNOWN_ROLES: AdminRole[] = ['R-ADMIN', 'R-DATA-PROVIDER', 'R-LOCAL-OPERATO
 // Highest-authority role wins when a token carries several.
 const ROLE_PRIORITY: AdminRole[] = ['R-ADMIN', 'R-DATA-PROVIDER', 'R-LOCAL-OPERATOR']
 
-// localStorage key for the cached admin access token. The token is restored from
-// /api/v1/auth/session on first load and kept here so a page refresh does not
-// require re-hitting the session endpoint.
-const SESSION_ACCESS_TOKEN_KEY = 'lovv.admin.accessToken'
+// In-memory cache of the admin access token. Deliberately NOT localStorage: a
+// persisted token is readable by any script (XSS exposure). The token is
+// short-lived and restored from the httpOnly session cookie
+// (/api/v1/auth/session) on each load, so memory-only loses no UX but removes the
+// persistent-theft surface. Lives for the page's lifetime; cleared on refresh.
+let inMemoryAccessToken = ''
 
 function base64UrlDecode(segment: string): string {
   const base64 = segment.replace(/-/g, '+').replace(/_/g, '/')
@@ -52,31 +54,18 @@ export function decodeTokenRoles(token: string | null | undefined): AdminRole[] 
   }
 }
 
-// Read/persist/clear the cached access token. Every storage access is guarded so a
-// disabled or unavailable localStorage (privacy mode, SSR) degrades to "no token"
-// instead of throwing.
-export function getStoredAccessToken(storage: Storage | undefined = globalThis.localStorage): string {
-  try {
-    return storage?.getItem(SESSION_ACCESS_TOKEN_KEY)?.trim() ?? ''
-  } catch {
-    return ''
-  }
+// Read/persist/clear the in-memory access token. The name is kept ("stored") for
+// callers, but the backing store is a module variable, not localStorage.
+export function getStoredAccessToken(): string {
+  return inMemoryAccessToken
 }
 
-export function storeAccessToken(token: string, storage: Storage | undefined = globalThis.localStorage): void {
-  try {
-    storage?.setItem(SESSION_ACCESS_TOKEN_KEY, token)
-  } catch {
-    // Ignore storage failures; the in-memory token still drives this session.
-  }
+export function storeAccessToken(token: string | null | undefined): void {
+  inMemoryAccessToken = token?.trim() ?? ''
 }
 
-export function clearAccessToken(storage: Storage | undefined = globalThis.localStorage): void {
-  try {
-    storage?.removeItem(SESSION_ACCESS_TOKEN_KEY)
-  } catch {
-    // Ignore storage failures; logout still clears the in-memory token.
-  }
+export function clearAccessToken(): void {
+  inMemoryAccessToken = ''
 }
 
 // Resolve the roles that drive UI gating. Precedence: an explicitly supplied token
