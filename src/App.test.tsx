@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { clearAccessToken } from './admin/session'
 
 const apiProposal = {
   proposalId: 'proposal-1',
@@ -66,7 +67,7 @@ describe('Lovv admin console', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.unstubAllEnvs()
-    window.localStorage.clear()
+    clearAccessToken()
   })
 
   it('renders the admin workflow overview with role-based lanes', () => {
@@ -127,6 +128,48 @@ describe('Lovv admin console', () => {
     expect(screen.getByRole('tab', { name: '제안 검토' })).toBeDisabled()
     expect(screen.getByRole('tab', { name: '반영 상태' })).toBeDisabled()
     expect(screen.getByRole('heading', { name: '유효한 세션 역할이 없습니다' })).toBeInTheDocument()
+  })
+
+  it('summarizes local operator metrics from the admin API', async () => {
+    useSessionRole('R-LOCAL-OPERATOR')
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = requestUrl(input)
+      if (url.includes('/api/v1/admin/metrics/destinations')) {
+        return jsonResponse({
+          items: [
+            {
+              monthlyCuratedDestinationId: 'monthly-1',
+              cityId: 'gangneung',
+              regionId: 'KR-42-150',
+              startDate: '2026-10-01',
+              endDate: '2026-10-31',
+              destinationImpressions: 100,
+              destinationDetailOpens: 40,
+              itineraryGenerated: 25,
+              itinerarySaved: 10,
+              officialLinkClicks: 12,
+              partnerLinkClicks: 8,
+              visitIntentSubmitted: 6,
+              visitConfirmed: 2,
+              distinctUserCount: 9,
+              minGroupSizeMet: true,
+            },
+          ],
+        })
+      }
+      return jsonResponse({ items: [] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+
+    const dashboard = await screen.findByRole('region', { name: '지역 운영자 집계 대시보드' })
+    expect(within(dashboard).getByText('총 노출')).toBeInTheDocument()
+    expect(within(dashboard).getByText('100')).toBeInTheDocument()
+    expect(within(dashboard).getByText('저장 전환율')).toBeInTheDocument()
+    expect(within(dashboard).getByText('25%')).toBeInTheDocument()
+    expect(within(dashboard).getByText('공식 12 / 제휴 8')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/admin/metrics/destinations'))).toBe(true)
   })
 
   it('creates a data proposal through the admin API without client-owned authority fields', async () => {
@@ -367,7 +410,7 @@ describe('Lovv admin console', () => {
   })
   it('restores the session token from /api/v1/auth/session when no local token exists', async () => {
     vi.stubEnv('VITE_LOVV_ADMIN_ACCESS_TOKEN', '')
-    window.localStorage.clear()
+    clearAccessToken()
     const adminToken = makeToken(['R-ADMIN'])
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString()
@@ -427,6 +470,78 @@ describe('Lovv admin console', () => {
     expect(
       fetchMock.mock.calls.some(([input]) => String(input).includes('/monthly-destinations/monthly-1/publish-jobs')),
     ).toBe(true)
+  })
+
+  it('lists notices and recommendation policies in the operations tab', async () => {
+    const notice = {
+      id: 'notice-1',
+      title: '추천 반영 일정 안내',
+      body: '월간 후보가 추천 캐시에 반영되는 일정을 공지합니다.',
+      audience: 'admin',
+      severity: 'info',
+      status: 'draft',
+    }
+    const policy = {
+      id: 'policy-1',
+      policyKey: 'small_city_balance',
+      title: '소도시 노출 균형 정책',
+      description: '과소 노출 소도시를 우선 고려합니다.',
+      priority: 80,
+      status: 'draft',
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.includes('/api/v1/admin/notices')) {
+        return jsonResponse({ items: [notice] })
+      }
+      if (url.includes('/api/v1/admin/recommendation-policies')) {
+        return jsonResponse({ items: [policy] })
+      }
+      return jsonResponse({ items: [] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+    fireEvent.click(screen.getByRole('tab', { name: '공지·정책' }))
+
+    expect(
+      await screen.findByRole('heading', { name: '공지·추천 정책 관리' }),
+    ).toBeInTheDocument()
+    expect(await screen.findByText('추천 반영 일정 안내')).toBeInTheDocument()
+    expect(await screen.findByText('소도시 노출 균형 정책')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/admin/notices'))).toBe(true)
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/admin/recommendation-policies')),
+    ).toBe(true)
+  })
+
+  it('lists audit log entries in the audit tab', async () => {
+    const entry = {
+      id: 'audit-1',
+      occurredAt: '2026-06-24T00:00:00Z',
+      actorUserId: 'admin-1',
+      action: 'data_proposal.approve',
+      resourceType: 'data_proposal',
+      resourceId: 'proposal-1',
+      result: 'succeeded',
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.includes('/api/v1/admin/audit-logs')) {
+        return jsonResponse({ items: [entry] })
+      }
+      return jsonResponse({ items: [] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+    fireEvent.click(screen.getByRole('tab', { name: '감사 로그' }))
+
+    expect(await screen.findByRole('heading', { name: '감사 로그' })).toBeInTheDocument()
+    const table = await screen.findByRole('table', { name: '감사 로그 목록' })
+    expect(within(table).getByText('data_proposal.approve')).toBeInTheDocument()
+    expect(within(table).getByText('성공')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/admin/audit-logs'))).toBe(true)
   })
 
 })
