@@ -105,7 +105,6 @@ type RecommendationPolicyMutationResponse = {
 }
 
 const defaultApiBaseUrl = import.meta.env.VITE_LOVV_API_BASE_URL?.trim() ?? ''
-const defaultDevAccessToken = import.meta.env.VITE_LOVV_ADMIN_ACCESS_TOKEN?.trim() ?? ''
 // Default page size for list endpoints. Sent explicitly (not relying on the
 // backend default) so the client controls how many rows a tab renders.
 const DEFAULT_LIMIT = 50
@@ -124,7 +123,7 @@ export class AdminApiError extends Error {
 
 export function createAdminApiClient(options: AdminApiClientOptions = {}) {
   const baseUrl = options.baseUrl ?? defaultApiBaseUrl
-  const accessToken = options.accessToken ?? defaultDevAccessToken
+  const accessToken = options.accessToken ?? ''
   const fetchImpl = options.fetchImpl ?? fetch
 
   async function request<T>(path: string, init: RequestInit = {}): Promise<T> {

@@ -578,6 +578,15 @@ function ReviewQueuePanel({
 }) {
   const selectedProposal = proposals[0]
   const canMakeDecision = currentRole === 'R-ADMIN'
+  const canStartReview = selectedProposal?.status === 'submitted'
+  const canDecideProposal = selectedProposal?.status === 'in_review'
+  const decisionHint = selectedProposal
+    ? canStartReview
+      ? '제출된 제안은 검토를 시작할 수 있습니다.'
+      : canDecideProposal
+        ? '검토 중인 제안은 승인 또는 반려할 수 있습니다.'
+        : '이미 처리된 제안은 이력만 조회할 수 있습니다.'
+    : '검토할 제안이 없습니다.'
 
   return (
     <section className="review-layout" aria-label="관리자 검토 작업 영역">
@@ -653,12 +662,13 @@ function ReviewQueuePanel({
         </dl>
         {canMakeDecision && (
           <>
+            <p className="decision-state-note">{decisionHint}</p>
             <div className="decision-actions">
               <button
                 type="button"
                 className="approve-button"
                 onClick={() => selectedProposal && onReview(selectedProposal.id)}
-                disabled={!selectedProposal || isMutating}
+                disabled={!selectedProposal || isMutating || !canStartReview}
               >
                 검토 시작
               </button>
@@ -666,7 +676,7 @@ function ReviewQueuePanel({
                 type="button"
                 className="approve-button"
                 onClick={() => selectedProposal && onApprove(selectedProposal.id)}
-                disabled={!selectedProposal || isMutating}
+                disabled={!selectedProposal || isMutating || !canDecideProposal}
               >
                 승인
               </button>
@@ -674,7 +684,7 @@ function ReviewQueuePanel({
                 type="button"
                 className="reject-button"
                 onClick={() => selectedProposal && onReject(selectedProposal.id)}
-                disabled={!selectedProposal || isMutating}
+                disabled={!selectedProposal || isMutating || !canDecideProposal}
               >
                 반려
               </button>
@@ -1117,26 +1127,26 @@ export function AdminDashboard() {
   }, [accessToken, authClient])
 
   useEffect(() => {
-    if (activeTab !== 'metrics' || !currentRole) {
+    if (!accessToken || activeTab !== 'metrics' || !currentRole) {
       return
     }
     void loadMetrics()
-  }, [activeTab, currentRole, loadMetrics])
+  }, [accessToken, activeTab, currentRole, loadMetrics])
 
   useEffect(() => {
-    if (activeTab !== 'operations' || currentRole !== 'R-ADMIN') {
+    if (!accessToken || activeTab !== 'operations' || currentRole !== 'R-ADMIN') {
       return
     }
     void loadOperations()
-  }, [activeTab, currentRole, loadOperations])
+  }, [accessToken, activeTab, currentRole, loadOperations])
 
   // Load the audit trail lazily, only when an admin opens the 감사 로그 tab.
   useEffect(() => {
-    if (activeTab !== 'audit' || currentRole !== 'R-ADMIN') {
+    if (!accessToken || activeTab !== 'audit' || currentRole !== 'R-ADMIN') {
       return
     }
     void loadAudit()
-  }, [activeTab, currentRole, loadAudit])
+  }, [accessToken, activeTab, currentRole, loadAudit])
 
   const loadProposals = useCallback(async () => {
     setIsProposalLoading(true)
@@ -1153,6 +1163,11 @@ export function AdminDashboard() {
   }, [adminApi])
 
   useEffect(() => {
+    if (!accessToken || !currentRole) {
+      setIsProposalLoading(false)
+      return
+    }
+
     let isCurrent = true
 
     adminApi
@@ -1177,7 +1192,7 @@ export function AdminDashboard() {
     return () => {
       isCurrent = false
     }
-  }, [adminApi])
+  }, [accessToken, adminApi, currentRole])
 
   const [publishJobs, setPublishJobs] = useState<PublishJob[]>([])
   const [jobsDestinationId, setJobsDestinationId] = useState<string | null>(null)
@@ -1242,11 +1257,11 @@ export function AdminDashboard() {
 
   // Load monthly candidates lazily, only when the 반영 상태 tab is opened.
   useEffect(() => {
-    if (activeTab !== 'publish') {
+    if (!accessToken || activeTab !== 'publish') {
       return
     }
     void loadMonthly()
-  }, [activeTab, loadMonthly])
+  }, [accessToken, activeTab, loadMonthly])
 
   const handleMonthlyTransition = useCallback(
     async (destinationId: string, action: MonthlyDestinationAction) => {
