@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { adaptAdminProposal, createAdminApiClient } from './adminApi'
+import { adaptAdminProposal, adaptDestinationMetricsSummary, createAdminApiClient } from './adminApi'
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return Promise.resolve(
@@ -145,4 +145,38 @@ describe('adminApi', () => {
       evidence: '근거 자료 없음',
     })
   })
+  it('keeps official and partner link metrics separated while exposing a total', () => {
+    expect(
+      adaptDestinationMetricsSummary({
+        monthlyCuratedDestinationId: 'monthly-1',
+        cityId: 'gangneung',
+        regionId: 'KR-42-150',
+        startDate: '2026-10-01',
+        endDate: '2026-10-31',
+        officialLinkClicks: 7,
+        partnerLinkClicks: 3,
+      }),
+    ).toMatchObject({
+      destinationId: 'monthly-1',
+      officialLinkClicks: 7,
+      partnerLinkClicks: 3,
+      linkClicks: 10,
+      dateRange: '2026-10-01 ~ 2026-10-31',
+    })
+  })
+  it('sends an explicit default page-size limit on list endpoints', async () => {
+    // Fresh Response per call (not mockResolvedValue, which reuses one Response
+    // and would fail the second read with "Body already read").
+    const fetchImpl = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({ items: [] }))
+    const client = createAdminApiClient({ baseUrl: 'https://api.lovv.example', fetchImpl })
+
+    await client.listMonthlyDestinations()
+    expect(fetchImpl.mock.calls[0][0]).toBe(
+      'https://api.lovv.example/api/v1/admin/monthly-destinations?limit=50',
+    )
+
+    await client.listAuditLogs({ limit: 10 })
+    expect(String(fetchImpl.mock.calls[1][0])).toContain('limit=10')
+  })
+
 })
