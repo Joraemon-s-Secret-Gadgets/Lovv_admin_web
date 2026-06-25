@@ -1,6 +1,6 @@
 // Shared types for the admin console: UI enums (tab/role/status), the API
 // request/response contracts, and the adapted view models used by components.
-export type AdminTab = 'metrics' | 'proposal' | 'review' | 'publish'
+export type AdminTab = 'metrics' | 'proposal' | 'review' | 'publish' | 'operations' | 'audit'
 
 export type AdminRole = 'R-LOCAL-OPERATOR' | 'R-DATA-PROVIDER' | 'R-ADMIN'
 
@@ -262,9 +262,112 @@ export type DestinationMetricsSummary = {
   destinationDetailOpens: number
   itineraryGenerated: number
   itinerarySaved: number
+  officialLinkClicks: number
+  partnerLinkClicks: number
   linkClicks: number
   visitIntentSubmitted: number
   visitConfirmed: number
   distinctUserCount: number
   minGroupSizeMet: boolean
+}
+
+// Operator notices and recommendation policies (step 16). Both are admin-managed
+// control-plane records with simple draft/published(active)/archived lifecycles.
+export type AdminNoticeStatus = 'draft' | 'published' | 'archived'
+export type AdminNoticeAction = 'publish' | 'archive'
+
+export type AdminNoticeResponse = {
+  id?: string
+  title?: string
+  body?: string
+  audience?: string
+  severity?: 'info' | 'warning' | 'critical'
+  status?: AdminNoticeStatus
+  startsAt?: string | null
+  endsAt?: string | null
+  publishedAt?: string | null
+  archivedAt?: string | null
+  updatedAt?: string | null
+}
+
+export type AdminNotice = {
+  id: string
+  title: string
+  body: string
+  audience: string
+  severity: 'info' | 'warning' | 'critical'
+  status: AdminNoticeStatus
+  updatedAt?: string | null
+}
+
+export type AdminNoticeRequest = {
+  title: string
+  body: string
+  audience?: string
+  severity?: 'info' | 'warning' | 'critical'
+}
+
+export type RecommendationPolicyStatus = 'draft' | 'active' | 'archived'
+export type RecommendationPolicyAction = 'activate' | 'archive'
+
+export type RecommendationPolicyResponse = {
+  id?: string
+  policyKey?: string
+  title?: string
+  description?: string | null
+  rules?: Record<string, unknown>
+  priority?: number
+  status?: RecommendationPolicyStatus
+  effectiveFrom?: string | null
+  effectiveUntil?: string | null
+  activatedAt?: string | null
+  archivedAt?: string | null
+  updatedAt?: string | null
+}
+
+export type RecommendationPolicy = {
+  id: string
+  policyKey: string
+  title: string
+  description?: string | null
+  rules: Record<string, unknown>
+  priority: number
+  status: RecommendationPolicyStatus
+  updatedAt?: string | null
+}
+
+export type RecommendationPolicyRequest = {
+  policyKey: string
+  title: string
+  description?: string
+  rules?: Record<string, unknown>
+  priority?: number
+}
+
+// Audit log (step 17). Append-only record of every admin mutation, surfaced
+// read-only in the console as the audit trail / monitoring view.
+export type AuditLogResult = 'allowed' | 'denied' | 'succeeded' | 'failed'
+
+export type AuditLogResponse = {
+  id?: string
+  occurredAt?: string | null
+  actorUserId?: string | null
+  rolesSnapshot?: string[]
+  action?: string
+  resourceType?: string | null
+  resourceId?: string | null
+  result?: AuditLogResult
+  reasonCode?: string | null
+  afterSummary?: Record<string, unknown>
+  metadata?: Record<string, unknown>
+}
+
+export type AuditLogEntry = {
+  id: string
+  occurredAt: string | null
+  actorUserId: string | null
+  action: string
+  resourceType: string | null
+  resourceId: string | null
+  result: AuditLogResult
 }

@@ -416,7 +416,7 @@ h3 {
 }
 
 .metric-table {
-  overflow: hidden;
+  overflow-x: auto;
   border: 1px solid var(--lovv-color-border-soft);
   border-radius: 8px;
   background: var(--lovv-color-warm-card);
@@ -440,6 +440,50 @@ h3 {
   color: var(--lovv-color-text-soft);
   background: var(--lovv-color-soft);
   font-weight: 900;
+}
+
+.metric-row-wide {
+  grid-template-columns: 1.4fr repeat(8, minmax(74px, 1fr));
+  min-width: 920px;
+}
+
+.local-dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.local-dashboard-card {
+  min-height: 132px;
+  padding: 18px;
+  border: 1px solid var(--lovv-color-border-soft);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgb(255 255 250 / 0.96), rgb(255 248 246 / 0.88)),
+    var(--lovv-color-warm-card);
+  box-shadow: var(--lovv-shadow-panel);
+}
+
+.local-dashboard-card span {
+  display: block;
+  color: var(--lovv-color-text-soft);
+  font-weight: 900;
+}
+
+.local-dashboard-card strong {
+  display: block;
+  margin-top: 10px;
+  color: var(--lovv-color-text);
+  font-size: 1.85rem;
+  line-height: 1;
+}
+
+.local-dashboard-card p {
+  margin: 12px 0 0;
+  color: var(--lovv-color-text-soft);
+  font-weight: 700;
+  line-height: 1.45;
 }
 
 .trend-up {
@@ -691,6 +735,22 @@ h3 {
   background: var(--lovv-color-primary-deep);
 }
 
+.decision-actions button:disabled {
+  border: 1px solid var(--lovv-color-border);
+  color: var(--lovv-color-text-soft);
+  background: #ece7df;
+  box-shadow: none;
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.decision-state-note {
+  margin: 16px 0 0;
+  color: var(--lovv-color-text-soft);
+  font-size: 0.88rem;
+  font-weight: 850;
+}
+
 .reason-box {
   margin-top: 18px;
   padding: 14px;
@@ -785,6 +845,7 @@ h3 {
   }
 
   .summary-grid,
+  .local-dashboard-grid,
   .role-lanes,
   .review-layout {
     grid-template-columns: 1fr;
@@ -824,6 +885,82 @@ h3 {
   }
 
   .timeline li {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Operations (공지·추천 정책) tab: two-column cards of notice/policy lists. */
+.operations-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.operations-card {
+  padding: 18px;
+  border: 1px solid var(--lovv-color-border-soft);
+  border-radius: 8px;
+  background: var(--lovv-color-surface);
+}
+
+.operations-card h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  color: var(--lovv-color-text);
+}
+
+.operations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.operations-list li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--lovv-color-border-soft);
+  border-radius: 6px;
+  background: var(--lovv-color-warm-card);
+}
+
+.operations-list strong {
+  display: block;
+  color: var(--lovv-color-text);
+}
+
+.operations-list p {
+  margin: 4px 0 6px;
+  color: var(--lovv-color-text-soft);
+  font-size: 13px;
+}
+
+.operations-list span {
+  font-size: 12px;
+  color: var(--lovv-color-text-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.inline-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.empty-state {
+  margin: 0;
+  color: var(--lovv-color-text-soft);
+  font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .operations-grid {
     grid-template-columns: 1fr;
   }
 }

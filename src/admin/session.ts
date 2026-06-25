@@ -71,11 +71,7 @@ export function clearAccessToken(): void {
 // Resolve the roles that drive UI gating. Precedence: an explicitly supplied token
 // (the live restored session), then the cached token, then the Vite dev token.
 export function getSessionRoles(token?: string | null): AdminRole[] {
-  const resolved =
-    token?.trim() ||
-    getStoredAccessToken() ||
-    import.meta.env.VITE_LOVV_ADMIN_ACCESS_TOKEN?.trim() ||
-    ''
+  const resolved = token?.trim() || getStoredAccessToken() || ''
   return decodeTokenRoles(resolved)
 }
 
