@@ -4,9 +4,9 @@ import type { AdminRole } from './types'
 // re-checks roles on every request. Decoding here just lets the console show the
 // correct tabs/actions for whoever the access token belongs to.
 
-const KNOWN_ROLES: AdminRole[] = ['R-ADMIN', 'R-DATA-PROVIDER', 'R-LOCAL-OPERATOR']
+const KNOWN_ROLES: AdminRole[] = ['R-SUPER-ADMIN', 'R-ADMIN', 'R-DATA-PROVIDER', 'R-LOCAL-OPERATOR']
 // Highest-authority role wins when a token carries several.
-const ROLE_PRIORITY: AdminRole[] = ['R-ADMIN', 'R-DATA-PROVIDER', 'R-LOCAL-OPERATOR']
+const ROLE_PRIORITY: AdminRole[] = ['R-SUPER-ADMIN', 'R-ADMIN', 'R-DATA-PROVIDER', 'R-LOCAL-OPERATOR']
 
 // In-memory cache of the admin access token. Deliberately NOT localStorage: a
 // persisted token is readable by any script (XSS exposure). The token is
@@ -68,10 +68,19 @@ export function clearAccessToken(): void {
   inMemoryAccessToken = ''
 }
 
+export function getDevAccessToken(): string {
+  return import.meta.env.DEV
+    ? import.meta.env.VITE_LOVV_ADMIN_ACCESS_TOKEN?.trim() ?? ''
+    : ''
+}
+
 // Resolve the roles that drive UI gating. Precedence: an explicitly supplied token
 // (the live restored session), then the cached token, then the Vite dev token.
+// The dev token is deliberately disabled outside Vite dev mode so a production
+// build cannot accidentally grant preview access through build-time env.
 export function getSessionRoles(token?: string | null): AdminRole[] {
-  const resolved = token?.trim() || getStoredAccessToken() || ''
+  const devToken = getDevAccessToken()
+  const resolved = token?.trim() || getStoredAccessToken() || devToken || ''
   return decodeTokenRoles(resolved)
 }
 

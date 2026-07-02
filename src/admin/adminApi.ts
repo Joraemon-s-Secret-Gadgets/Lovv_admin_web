@@ -4,6 +4,8 @@
 import type {
   AdminProposalHistoryResponse,
   AdminNotice,
+  AdminMfaEnrollment,
+  AdminMfaStatus,
   AdminNoticeAction,
   AdminNoticeRequest,
   AdminNoticeResponse,
@@ -11,6 +13,12 @@ import type {
   AdminProposalResponse,
   DestinationMetricsSummary,
   DestinationMetricsSummaryResponse,
+  HighRiskChangeRequest,
+  HighRiskChangeRequestInput,
+  HighRiskChangeRequestResponse,
+  HighRiskDecisionRequest,
+  HighRiskOperationType,
+  HighRiskRequestStatus,
   MonthlyDestination,
   MonthlyDestinationAction,
   MonthlyDestinationActionRequest,
@@ -56,6 +64,19 @@ type AdminProposalListResponse = {
   items?: AdminProposalResponse[]
 }
 
+type AdminMfaStatusResponse = {
+  mfa: AdminMfaStatus
+}
+
+type AdminMfaEnrollmentResponse = {
+  enrollment: AdminMfaEnrollment
+}
+
+type AdminMfaConfirmationResponse = {
+  recoveryCodes: string[]
+  status: AdminMfaStatus
+}
+
 type AdminProposalMutationResponse = {
   proposal?: AdminProposalResponse
 }
@@ -86,6 +107,15 @@ type AuditLogListResponse = {
 
 type DestinationMetricsSummaryListResponse = {
   items?: DestinationMetricsSummaryResponse[]
+}
+
+type HighRiskRequestListResponse = {
+  items?: HighRiskChangeRequestResponse[]
+  nextCursor?: string | null
+}
+
+type HighRiskRequestMutationResponse = {
+  request?: HighRiskChangeRequestResponse
 }
 
 type AdminNoticeListResponse = {
@@ -158,6 +188,37 @@ export function createAdminApiClient(options: AdminApiClientOptions = {}) {
   }
 
   return {
+    async getMfaStatus() {
+      const payload = await request<AdminMfaStatusResponse>('/api/v1/admin/security/mfa/status')
+      return payload.mfa
+    },
+    async enrollMfa() {
+      const payload = await request<AdminMfaEnrollmentResponse>('/api/v1/admin/security/mfa/enroll', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      })
+      return payload.enrollment
+    },
+    async confirmMfa(code: string) {
+      return request<AdminMfaConfirmationResponse>('/api/v1/admin/security/mfa/confirm', {
+        method: 'POST',
+        body: JSON.stringify({ code }),
+      })
+    },
+    async verifyMfa(code: string) {
+      const payload = await request<AdminMfaStatusResponse>('/api/v1/admin/security/mfa/verify', {
+        method: 'POST',
+        body: JSON.stringify({ code }),
+      })
+      return payload.mfa
+    },
+    async recoverMfa(recoveryCode: string) {
+      const payload = await request<AdminMfaStatusResponse>('/api/v1/admin/security/mfa/recover', {
+        method: 'POST',
+        body: JSON.stringify({ recoveryCode }),
+      })
+      return payload.mfa
+    },
     async listProposals() {
       const payload = await request<AdminProposalListResponse>('/api/v1/admin/data-proposals')
       return (payload.items ?? []).map(adaptAdminProposal)
@@ -331,6 +392,42 @@ export function createAdminApiClient(options: AdminApiClientOptions = {}) {
       const payload = await request<AuditLogListResponse>(`/api/v1/admin/audit-logs${suffix}`)
       return (payload.items ?? []).map(adaptAuditLog)
     },
+    async listHighRiskRequests(filters: { status?: HighRiskRequestStatus; operationType?: HighRiskOperationType; limit?: number } = {}) {
+      const query = new URLSearchParams()
+      if (filters.status) query.set('status', filters.status)
+      if (filters.operationType) query.set('operationType', filters.operationType)
+      query.set('limit', String(filters.limit ?? DEFAULT_LIMIT))
+      const suffix = query.toString() ? `?${query.toString()}` : ''
+      const payload = await request<HighRiskRequestListResponse>(`/api/v1/admin/high-risk-requests${suffix}`)
+      return (payload.items ?? []).map(adaptHighRiskRequest)
+    },
+    async createHighRiskRequest(input: HighRiskChangeRequestInput) {
+      const payload = await request<HighRiskRequestMutationResponse>('/api/v1/admin/high-risk-requests', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      })
+      return adaptHighRiskRequest(payload.request)
+    },
+    async approveHighRiskRequest(requestId: string, input: HighRiskDecisionRequest = {}) {
+      const payload = await request<HighRiskRequestMutationResponse>(
+        `/api/v1/admin/high-risk-requests/${encodeURIComponent(requestId)}/approve`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+      )
+      return adaptHighRiskRequest(payload.request)
+    },
+    async rejectHighRiskRequest(requestId: string, input: HighRiskDecisionRequest) {
+      const payload = await request<HighRiskRequestMutationResponse>(
+        `/api/v1/admin/high-risk-requests/${encodeURIComponent(requestId)}/reject`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+      )
+      return adaptHighRiskRequest(payload.request)
+    },
   }
 }
 
@@ -440,6 +537,25 @@ export function adaptAuditLog(entry: AuditLogResponse | undefined): AuditLogEntr
     resourceType: entry?.resourceType ?? null,
     resourceId: entry?.resourceId ?? null,
     result: entry?.result ?? 'succeeded',
+  }
+}
+
+export function adaptHighRiskRequest(item: HighRiskChangeRequestResponse | undefined): HighRiskChangeRequest {
+  return {
+    id: item?.id ?? '',
+    operationType: item?.operationType ?? 'role_grant',
+    targetUserId: item?.targetUserId ?? null,
+    payload: item?.payload ?? {},
+    status: item?.status ?? 'pending',
+    reason: item?.reason ?? '',
+    requestedBy: item?.requestedBy ?? null,
+    decidedBy: item?.decidedBy ?? null,
+    decisionReason: item?.decisionReason ?? null,
+    requestedAt: item?.requestedAt ?? null,
+    decidedAt: item?.decidedAt ?? null,
+    executedAt: item?.executedAt ?? null,
+    executionSummary: item?.executionSummary ?? {},
+    updatedAt: item?.updatedAt ?? null,
   }
 }
 
