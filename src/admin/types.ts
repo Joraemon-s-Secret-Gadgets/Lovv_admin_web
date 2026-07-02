@@ -1,8 +1,22 @@
 // Shared types for the admin console: UI enums (tab/role/status), the API
 // request/response contracts, and the adapted view models used by components.
-export type AdminTab = 'metrics' | 'proposal' | 'review' | 'publish' | 'operations' | 'audit'
+export type AdminTab = 'metrics' | 'proposal' | 'review' | 'publish' | 'operations' | 'highRisk' | 'audit'
 
-export type AdminRole = 'R-LOCAL-OPERATOR' | 'R-DATA-PROVIDER' | 'R-ADMIN'
+export type AdminRole = 'R-LOCAL-OPERATOR' | 'R-DATA-PROVIDER' | 'R-ADMIN' | 'R-SUPER-ADMIN'
+
+export type AdminMfaStatus = {
+  enrolled: boolean
+  credentialStatus: 'not_enrolled' | 'pending' | 'active' | 'revoked'
+  sessionVerified: boolean
+  sessionVerifiedAt?: string | null
+  sessionExpiresAt?: string | null
+  recoveryCodesRemaining: number
+}
+
+export type AdminMfaEnrollment = {
+  secret: string
+  provisioningUri: string
+}
 
 export type RoleTabPermissions = Record<AdminRole, readonly AdminTab[]>
 
@@ -370,4 +384,62 @@ export type AuditLogEntry = {
   resourceType: string | null
   resourceId: string | null
   result: AuditLogResult
+}
+
+export type HighRiskOperationType =
+  | 'role_grant'
+  | 'role_revoke'
+  | 'region_grant'
+  | 'region_revoke'
+  | 'bulk_publish'
+
+export type HighRiskRequestStatus = 'pending' | 'executed' | 'rejected'
+
+export type HighRiskChangeRequestResponse = {
+  id?: string
+  operationType?: HighRiskOperationType
+  targetUserId?: string | null
+  payload?: Record<string, unknown>
+  status?: HighRiskRequestStatus
+  reason?: string
+  requestedBy?: string | null
+  decidedBy?: string | null
+  decisionReason?: string | null
+  requestedAt?: string | null
+  decidedAt?: string | null
+  executedAt?: string | null
+  executionSummary?: Record<string, unknown>
+  updatedAt?: string | null
+}
+
+export type HighRiskChangeRequest = {
+  id: string
+  operationType: HighRiskOperationType
+  targetUserId: string | null
+  payload: Record<string, unknown>
+  status: HighRiskRequestStatus
+  reason: string
+  requestedBy: string | null
+  decidedBy: string | null
+  decisionReason: string | null
+  requestedAt: string | null
+  decidedAt: string | null
+  executedAt: string | null
+  executionSummary: Record<string, unknown>
+  updatedAt: string | null
+}
+
+export type HighRiskChangeRequestInput = {
+  operationType: HighRiskOperationType
+  reason: string
+  targetUserId?: string
+  roleCode?: AdminRole
+  regionId?: string
+  organizationId?: string
+  validUntil?: string
+  destinationIds?: string[]
+}
+
+export type HighRiskDecisionRequest = {
+  decisionReason?: string
 }

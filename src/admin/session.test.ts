@@ -20,8 +20,8 @@ function makeToken(payload: Record<string, unknown>) {
 
 describe('session role decoding', () => {
   it('extracts known admin roles from a token payload array', () => {
-    const token = makeToken({ sub: 'u1', roles: ['R-ADMIN', 'R-USER'] })
-    expect(decodeTokenRoles(token)).toEqual(['R-ADMIN'])
+    const token = makeToken({ sub: 'u1', roles: ['R-SUPER-ADMIN', 'R-ADMIN', 'R-USER'] })
+    expect(decodeTokenRoles(token)).toEqual(['R-SUPER-ADMIN', 'R-ADMIN'])
   })
 
   it('supports comma-separated role strings', () => {
@@ -37,6 +37,7 @@ describe('session role decoding', () => {
   })
 
   it('resolves the highest-authority role first', () => {
+    expect(resolvePrimaryRole(['R-ADMIN', 'R-SUPER-ADMIN'])).toBe('R-SUPER-ADMIN')
     expect(resolvePrimaryRole(['R-LOCAL-OPERATOR', 'R-ADMIN'])).toBe('R-ADMIN')
     expect(resolvePrimaryRole(['R-DATA-PROVIDER', 'R-LOCAL-OPERATOR'])).toBe('R-DATA-PROVIDER')
     expect(resolvePrimaryRole([])).toBeNull()
@@ -83,6 +84,13 @@ describe('getSessionRoles precedence', () => {
     clearAccessToken()
     vi.stubEnv('VITE_LOVV_ADMIN_ACCESS_TOKEN', makeToken({ roles: ['R-ADMIN'] }))
     expect(getSessionRoles()).toEqual(['R-ADMIN'])
+  })
+
+  it('ignores the Vite dev token outside dev mode', () => {
+    vi.stubEnv('DEV', false)
+    vi.stubEnv('VITE_LOVV_ADMIN_ACCESS_TOKEN', makeToken({ roles: ['R-ADMIN'] }))
+
+    expect(getSessionRoles()).toEqual([])
   })
 
   it('returns no roles when no token is available anywhere', () => {

@@ -1,13 +1,22 @@
-// Admin console shell. The active session role is derived from the access token
-// (see ./session), and that role gates which tabs/actions are shown. All proposal
+// Admin console shell. Session roles are derived from the access token (see
+// ./session), and their union gates which tabs/actions are shown. All proposal
 // data flows through ./adminApi; the backend re-authorizes every call, so this
 // gating is UX, not a security boundary.
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { createAdminApiClient, createAdminAuthClient } from './adminApi'
-import { localMetrics, proposalDraft, roleLanes, summaryMetrics } from './adminData'
-import { getSessionRoles, getStoredAccessToken, resolvePrimaryRole, storeAccessToken } from './session'
+import { AdminApiError, createAdminApiClient, createAdminAuthClient } from './adminApi'
+import {
+  localMetrics,
+  proposalDraft,
+  roleLanes,
+  sampleDestinationMetrics,
+  sampleProposals,
+  summaryMetrics,
+} from './adminData'
+import { getDevAccessToken, getSessionRoles, getStoredAccessToken, resolvePrimaryRole, storeAccessToken } from './session'
 import type {
   AdminNotice,
+  AdminMfaEnrollment,
+  AdminMfaStatus,
   AdminNoticeAction,
   AdminNoticeRequest,
   AdminProposalRequest,
@@ -15,6 +24,9 @@ import type {
   AdminTab,
   AuditLogEntry,
   DestinationMetricsSummary,
+  HighRiskChangeRequest,
+  HighRiskChangeRequestInput,
+  HighRiskOperationType,
   MonthlyDestination,
   MonthlyDestinationAction,
   MonthlyDestinationStatus,
@@ -38,6 +50,7 @@ const tabs: { id: AdminTab; label: string }[] = [
   { id: 'review', label: '제안 검토' },
   { id: 'publish', label: '반영 상태' },
   { id: 'operations', label: '공지·정책' },
+  { id: 'highRisk', label: '권한 승인' },
   { id: 'audit', label: '감사 로그' },
 ]
 
@@ -46,13 +59,15 @@ const tabs: { id: AdminTab; label: string }[] = [
 const roleTabPermissions: RoleTabPermissions = {
   'R-LOCAL-OPERATOR': ['metrics'],
   'R-DATA-PROVIDER': ['proposal'],
-  'R-ADMIN': ['metrics', 'review', 'publish', 'operations', 'audit'],
+  'R-ADMIN': ['metrics', 'review', 'publish', 'operations', 'highRisk', 'audit'],
+  'R-SUPER-ADMIN': ['highRisk'],
 }
 
 const roleDefaultTab: Record<AdminRole, AdminTab> = {
   'R-LOCAL-OPERATOR': 'metrics',
   'R-DATA-PROVIDER': 'proposal',
   'R-ADMIN': 'metrics',
+  'R-SUPER-ADMIN': 'highRisk',
 }
 
 const toneLabelClassNames: Record<SummaryMetric['tone'], string> = {
@@ -69,24 +84,195 @@ function getStatusContrast(status: ProposalStatus) {
   return highContrastStatusText.has(status) ? 'on-dark' : undefined
 }
 
-function isTabAllowed(role: AdminRole | null, tabId: AdminTab) {
-  return role ? roleTabPermissions[role].includes(tabId) : false
+function hasRole(roles: readonly AdminRole[], role: AdminRole) {
+  return roles.includes(role)
 }
 
-function getTabLockReason(role: AdminRole | null, tabLabel: string) {
-  return `역할 접근 제한: ${role ?? '권한 없음'} 역할은 ${tabLabel} 작업 영역을 사용할 수 없습니다.`
+function isTabAllowed(roles: readonly AdminRole[], tabId: AdminTab) {
+  return roles.some((role) => roleTabPermissions[role].includes(tabId))
 }
 
-function SummaryCards() {
+function getTabLockReason(roles: readonly AdminRole[], tabLabel: string) {
+  const roleLabel = roles.length > 0 ? roles.join(', ') : '권한 없음'
+  return `역할 접근 제한: ${roleLabel} 역할은 ${tabLabel} 작업 영역을 사용할 수 없습니다.`
+}
+
+const samplePreviewRoles: AdminRole[] = [
+  'R-SUPER-ADMIN',
+  'R-ADMIN',
+  'R-DATA-PROVIDER',
+  'R-LOCAL-OPERATOR',
+]
+
+// Map each summary card to a live count derived from the proposal list.
+// Counts are computed from the same API data the review queue uses.
+function SummaryCards({ proposals, isLoading }: { proposals: ReviewProposal[]; isLoading: boolean }) {
+  const counts = useMemo(() => {
+    const countByStatus = (statuses: ProposalStatus[]) =>
+      proposals.filter((proposal) => statuses.includes(proposal.status)).length
+
+    return {
+      '제출 제안': proposals.length,
+      '승인 완료': countByStatus(['approved']),
+      '반려/수정 요청': countByStatus(['rejected', 'change_requested']),
+      '반영 상태': countByStatus(['published', 'indexed']),
+    } as Record<string, number>
+  }, [proposals])
+
   return (
     <section className="summary-grid" aria-label="관리자 처리 현황">
-      {summaryMetrics.map((metric) => (
-        <article className={`summary-card ${toneLabelClassNames[metric.tone]}`} key={metric.label}>
-          <span>{metric.label}</span>
-          <strong>{metric.value}</strong>
-          <p>{metric.detail}</p>
-        </article>
-      ))}
+      {summaryMetrics.map((metric) => {
+        const count = counts[metric.label]
+        const display = isLoading ? '—' : count !== undefined ? String(count) : metric.value
+        return (
+          <article className={`summary-card ${toneLabelClassNames[metric.tone]}`} key={metric.label}>
+            <span>{metric.label}</span>
+            <strong>{display}</strong>
+            <p>{metric.detail}</p>
+          </article>
+        )
+      })}
+    </section>
+  )
+}
+
+// Orange value ramp (dark → light) for inline SVG charts; brightness separates segments.
+const INSIGHT_SHADES = ['#7a3100', '#a8460c', '#d65f12', '#ff7017', '#ff9a52', '#ffc394']
+
+type ChartDatum = { label: string; value: number }
+
+// Donut chart of proposal status distribution (no chart library; inline SVG).
+function StatusDonut({ data, total }: { data: ChartDatum[]; total: number }) {
+  const radius = 52
+  const circumference = 2 * Math.PI * radius
+  const segments = data.map((datum, index) => {
+    const fraction = total > 0 ? datum.value / total : 0
+    const previousFraction =
+      total > 0 ? data.slice(0, index).reduce((sum, item) => sum + item.value / total, 0) : 0
+    const dash = fraction * circumference
+    const rotation = previousFraction * 360 - 90
+    return {
+      ...datum,
+      color: INSIGHT_SHADES[index % INSIGHT_SHADES.length],
+      dash,
+      gap: circumference - dash,
+      rotation,
+    }
+  })
+
+  return (
+    <div className="donut-wrap">
+      <svg className="donut" viewBox="0 0 140 140" role="img" aria-label="제안 상태 분포 도넛 차트">
+        <circle cx="70" cy="70" r={radius} fill="none" stroke="#eceef2" strokeWidth="16" />
+        {segments.map((segment) => (
+          <circle
+            key={segment.label}
+            cx="70"
+            cy="70"
+            r={radius}
+            fill="none"
+            stroke={segment.color}
+            strokeWidth="16"
+            strokeDasharray={`${segment.dash} ${segment.gap}`}
+            transform={`rotate(${segment.rotation} 70 70)`}
+          />
+        ))}
+        <text x="70" y="68" textAnchor="middle" className="donut-total">
+          {total}
+        </text>
+        <text x="70" y="86" textAnchor="middle" className="donut-total-label">
+          전체
+        </text>
+      </svg>
+      <ul className="donut-legend">
+        {segments.map((segment) => (
+          <li key={segment.label}>
+            <span className="swatch" style={{ background: segment.color }} aria-hidden="true" />
+            <span className="legend-label">{segment.label}</span>
+            <span className="legend-value">{segment.value}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+// Pipeline funnel: how many proposals reach each stage, drawn as inline SVG bars.
+function StatusFunnel({ stages, total }: { stages: ChartDatum[]; total: number }) {
+  return (
+    <ul className="funnel">
+      {stages.map((stage) => {
+        const pct = total > 0 ? Math.round((stage.value / total) * 100) : 0
+        const width = total > 0 ? (stage.value / total) * 100 : 0
+        return (
+          <li key={stage.label} className="funnel-row">
+            <div className="funnel-meta">
+              <span className="funnel-label">{stage.label}</span>
+              <span className="funnel-value">
+                {stage.value} · {pct}%
+              </span>
+            </div>
+            <svg className="funnel-bar" viewBox="0 0 100 12" preserveAspectRatio="none" aria-hidden="true">
+              <rect x="0" y="0" width="100" height="12" rx="2.5" fill="#eceef2" />
+              <rect x="0" y="0" width={width} height="12" rx="2.5" fill="#ff7017" />
+            </svg>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+// Live visualizations derived from the same proposal list the review queue uses.
+function ProposalInsights({ proposals, isLoading }: { proposals: ReviewProposal[]; isLoading: boolean }) {
+  const { total, distribution, funnel } = useMemo(() => {
+    const countByStatus = (statuses: ProposalStatus[]) =>
+      proposals.filter((proposal) => statuses.includes(proposal.status)).length
+
+    const distribution: ChartDatum[] = [
+      { label: '대기·제출', value: countByStatus(['pending', 'submitted']) },
+      { label: '검토중', value: countByStatus(['in_review']) },
+      { label: '승인', value: countByStatus(['approved']) },
+      { label: '반려·수정', value: countByStatus(['rejected', 'change_requested']) },
+      { label: '반영', value: countByStatus(['published', 'indexed']) },
+      { label: '보관·철회', value: countByStatus(['withdrawn', 'archived', 'draft']) },
+    ].filter((datum) => datum.value > 0)
+
+    const funnel: ChartDatum[] = [
+      { label: '전체 제안', value: proposals.length },
+      {
+        label: '검토 진입',
+        value: countByStatus(['in_review', 'approved', 'rejected', 'change_requested', 'published', 'indexed']),
+      },
+      { label: '승인', value: countByStatus(['approved', 'published', 'indexed']) },
+      { label: '반영', value: countByStatus(['published', 'indexed']) },
+    ]
+
+    return { total: proposals.length, distribution, funnel }
+  }, [proposals])
+
+  return (
+    <section className="insights-grid" aria-label="제안 데이터 시각화">
+      <article className="insight-card">
+        <h3>제안 상태 분포</h3>
+        {isLoading ? (
+          <p className="empty-state">불러오는 중…</p>
+        ) : total === 0 ? (
+          <p className="empty-state">시각화할 제안이 없습니다.</p>
+        ) : (
+          <StatusDonut data={distribution} total={total} />
+        )}
+      </article>
+      <article className="insight-card">
+        <h3>진행 단계</h3>
+        {isLoading ? (
+          <p className="empty-state">불러오는 중…</p>
+        ) : total === 0 ? (
+          <p className="empty-state">시각화할 제안이 없습니다.</p>
+        ) : (
+          <StatusFunnel stages={funnel} total={total} />
+        )}
+      </article>
     </section>
   )
 }
@@ -94,24 +280,29 @@ function SummaryCards() {
 function RoleStatusPanel() {
   return (
     <section className="panel" aria-labelledby="role-status-title">
-      <div className="section-heading">
-        <span className="section-kicker">Role Gate</span>
-        <h2 id="role-status-title">역할 확인</h2>
-      </div>
-      <div className="role-lanes">
-        {roleLanes.map((lane) => (
-          <article className="role-lane" key={lane.role}>
-            <span className="role-badge">{lane.role}</span>
-            <h3>{lane.title}</h3>
-            <p>{lane.description}</p>
-            <ul>
-              {lane.responsibilities.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
-          </article>
-        ))}
-      </div>
+      <details className="collapsible" open>
+        <summary className="collapsible-summary">
+          <span className="collapsible-heading">
+            <span className="section-kicker">Role Gate</span>
+            <h2 id="role-status-title">역할 확인</h2>
+          </span>
+          <span className="collapsible-chevron" aria-hidden="true" />
+        </summary>
+        <div className="role-lanes">
+          {roleLanes.map((lane) => (
+            <article className="role-lane" key={lane.role}>
+              <span className="role-badge">{lane.role}</span>
+              <h3>{lane.title}</h3>
+              <p>{lane.description}</p>
+              <ul>
+                {lane.responsibilities.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </article>
+          ))}
+        </div>
+      </details>
     </section>
   )
 }
@@ -238,6 +429,19 @@ function LocalOperatorMetrics({
               <p>최소 집계 기준을 충족한 후보</p>
             </article>
           </section>
+          <div className="metric-viz">
+            <h3>지역별 노출 비중</h3>
+            <StatusFunnel
+              stages={[...items]
+                .sort((a, b) => b.destinationImpressions - a.destinationImpressions)
+                .slice(0, 6)
+                .map((item) => ({
+                  label: item.regionId || item.cityId || '-',
+                  value: item.destinationImpressions,
+                }))}
+              total={dashboard.totalImpressions}
+            />
+          </div>
           <div className="metric-table" role="table" aria-label="담당 지역 운영 지표">
             <div role="row" className="metric-row metric-row-head metric-row-wide">
               <span role="columnheader">지역/도시</span>
@@ -378,6 +582,329 @@ function AuditLogPanel({
   )
 }
 
+const highRiskOperationLabels: Record<HighRiskOperationType, string> = {
+  role_grant: '역할 부여',
+  role_revoke: '역할 회수',
+  region_grant: '지역 권한 부여',
+  region_revoke: '지역 권한 회수',
+  bulk_publish: '월간 후보 일괄 게시',
+}
+
+const highRiskStatusLabels: Record<HighRiskChangeRequest['status'], string> = {
+  pending: '승인 대기',
+  executed: '실행 완료',
+  rejected: '거절',
+}
+
+// The pending list is fetched with limit=50 (server-side clamp, no cursor), so a
+// full page of 50 means "50 or more". Render 50+ rather than implying an exact 50.
+const HIGH_RISK_PENDING_PAGE_SIZE = 50
+function formatPendingBadge(count: number) {
+  return count >= HIGH_RISK_PENDING_PAGE_SIZE ? `${HIGH_RISK_PENDING_PAGE_SIZE}+` : String(count)
+}
+function formatPendingCountText(count: number) {
+  return count >= HIGH_RISK_PENDING_PAGE_SIZE ? `${HIGH_RISK_PENDING_PAGE_SIZE}건 이상` : `${count}건`
+}
+
+type HighRiskRequestFormState = {
+  operationType: HighRiskOperationType
+  targetUserId: string
+  roleCode: AdminRole
+  regionId: string
+  organizationId: string
+  validUntil: string
+  destinationIds: string
+  reason: string
+}
+
+const defaultHighRiskForm: HighRiskRequestFormState = {
+  operationType: 'role_grant',
+  targetUserId: '',
+  roleCode: 'R-LOCAL-OPERATOR',
+  regionId: '',
+  organizationId: '',
+  validUntil: '',
+  destinationIds: '',
+  reason: '',
+}
+
+function isRoleHighRiskOperation(operationType: HighRiskOperationType) {
+  return operationType === 'role_grant' || operationType === 'role_revoke'
+}
+
+function isRegionHighRiskOperation(operationType: HighRiskOperationType) {
+  return operationType === 'region_grant' || operationType === 'region_revoke'
+}
+
+function getHighRiskTargetText(request: HighRiskChangeRequest) {
+  if (request.operationType === 'bulk_publish') {
+    const destinationIds = request.payload.destinationIds
+    return Array.isArray(destinationIds) ? `${destinationIds.length}개 후보` : '월간 후보'
+  }
+  return request.targetUserId || String(request.payload.targetUserId ?? '-')
+}
+
+function getHighRiskPayloadSummary(request: HighRiskChangeRequest) {
+  if (isRoleHighRiskOperation(request.operationType)) {
+    return String(request.payload.roleCode ?? '-')
+  }
+  if (isRegionHighRiskOperation(request.operationType)) {
+    return String(request.payload.regionId ?? '-')
+  }
+  const destinationIds = request.payload.destinationIds
+  return Array.isArray(destinationIds) ? destinationIds.join(', ') : '-'
+}
+
+function HighRiskRequestPanel({
+  requests,
+  form,
+  decisionReason,
+  isLoading,
+  isMutating,
+  errorMessage,
+  canCreate,
+  canDecide,
+  onFormChange,
+  onDecisionReasonChange,
+  onCreate,
+  onApprove,
+  onReject,
+  onRefresh,
+}: {
+  requests: HighRiskChangeRequest[]
+  form: HighRiskRequestFormState
+  decisionReason: string
+  isLoading: boolean
+  isMutating: boolean
+  errorMessage: string | null
+  canCreate: boolean
+  canDecide: boolean
+  onFormChange: (form: HighRiskRequestFormState) => void
+  onDecisionReasonChange: (value: string) => void
+  onCreate: () => void
+  onApprove: (requestId: string) => void
+  onReject: (requestId: string) => void
+  onRefresh: () => void
+}) {
+  const operationType = form.operationType
+  const requiresTargetUser = operationType !== 'bulk_publish'
+  const requiresRole = isRoleHighRiskOperation(operationType)
+  const requiresRegion = isRegionHighRiskOperation(operationType)
+  const requiresDestinationIds = operationType === 'bulk_publish'
+  const canSubmit =
+    canCreate &&
+    form.reason.trim().length > 0 &&
+    (!requiresTargetUser || form.targetUserId.trim().length > 0) &&
+    (!requiresRegion || form.regionId.trim().length > 0) &&
+    (!requiresDestinationIds || form.destinationIds.trim().length > 0)
+  const canSubmitDecision = canDecide
+
+  return (
+    <section className="high-risk-layout" aria-label="고위험 변경 승인 작업 영역">
+      <div className="panel">
+        <div className="section-heading">
+          <span className="section-kicker">C2 Approval</span>
+          <h2>권한 승인 요청</h2>
+          <button type="button" className="ghost-button" onClick={onRefresh} disabled={isLoading}>
+            새로고침
+          </button>
+        </div>
+        <form
+          className="high-risk-form"
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (canSubmit) {
+              onCreate()
+            }
+          }}
+        >
+          <label>
+            작업 유형
+            <select
+              value={operationType}
+              onChange={(event) =>
+                onFormChange({ ...form, operationType: event.target.value as HighRiskOperationType })
+              }
+            >
+              {Object.entries(highRiskOperationLabels).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {requiresTargetUser ? (
+            <label>
+              대상 사용자 ID
+              <input
+                value={form.targetUserId}
+                onChange={(event) => onFormChange({ ...form, targetUserId: event.target.value })}
+                placeholder="target-user-id"
+              />
+            </label>
+          ) : null}
+          {requiresRole ? (
+            <label>
+              역할
+              <select
+                value={form.roleCode}
+                onChange={(event) => onFormChange({ ...form, roleCode: event.target.value as AdminRole })}
+              >
+                <option value="R-ADMIN">R-ADMIN</option>
+                <option value="R-SUPER-ADMIN">R-SUPER-ADMIN</option>
+                <option value="R-DATA-PROVIDER">R-DATA-PROVIDER</option>
+                <option value="R-LOCAL-OPERATOR">R-LOCAL-OPERATOR</option>
+              </select>
+            </label>
+          ) : null}
+          {requiresRegion ? (
+            <label>
+              지역 ID
+              <input
+                value={form.regionId}
+                onChange={(event) => onFormChange({ ...form, regionId: event.target.value })}
+                placeholder="KR-42-150"
+              />
+            </label>
+          ) : null}
+          {requiresDestinationIds ? (
+            <label className="high-risk-wide-field">
+              월간 후보 ID
+              <textarea
+                value={form.destinationIds}
+                onChange={(event) => onFormChange({ ...form, destinationIds: event.target.value })}
+                placeholder="monthly-1, monthly-2, monthly-3"
+              />
+            </label>
+          ) : null}
+          {!requiresDestinationIds ? (
+            <>
+              <label>
+                조직 ID
+                <input
+                  value={form.organizationId}
+                  onChange={(event) => onFormChange({ ...form, organizationId: event.target.value })}
+                  placeholder="선택"
+                />
+              </label>
+              {(operationType === 'role_grant' || operationType === 'region_grant') ? (
+                <label>
+                  만료일
+                  <input
+                    value={form.validUntil}
+                    onChange={(event) => onFormChange({ ...form, validUntil: event.target.value })}
+                    placeholder="2026-12-31T00:00:00Z"
+                  />
+                </label>
+              ) : null}
+            </>
+          ) : null}
+          <label className="high-risk-wide-field">
+            요청 사유
+            <textarea
+              value={form.reason}
+              onChange={(event) => onFormChange({ ...form, reason: event.target.value })}
+              placeholder="감사 로그에 남길 업무 사유"
+            />
+          </label>
+          <div className="form-actions high-risk-wide-field">
+            <button type="submit" disabled={!canSubmit || isMutating}>
+              고위험 요청 생성
+            </button>
+          </div>
+        </form>
+        {errorMessage ? (
+          <p role="alert" className="error-text">
+            {errorMessage}
+          </p>
+        ) : null}
+      </div>
+
+      <div className="panel">
+        <div className="section-heading">
+          <span className="section-kicker">Pending Queue</span>
+          <h2>승인 대기 목록{requests.length > 0 ? ` (${formatPendingCountText(requests.length)})` : ''}</h2>
+        </div>
+        {canDecide ? (
+          <div className="high-risk-decision-box">
+            <label>
+              결정 사유
+              <input
+                value={decisionReason}
+                onChange={(event) => onDecisionReasonChange(event.target.value)}
+                placeholder="거절 시 필수"
+              />
+            </label>
+            <p className="high-risk-mfa-hint">승인·거절 시 인증 앱의 TOTP 코드가 필요합니다.</p>
+          </div>
+        ) : (
+          <p className="role-action-lock">승인·거절은 R-SUPER-ADMIN 역할만 수행할 수 있습니다.</p>
+        )}
+        {isLoading ? (
+          <p>고위험 요청을 불러오는 중입니다.</p>
+        ) : requests.length === 0 ? (
+          <p>승인 대기 중인 고위험 요청이 없습니다.</p>
+        ) : (
+          <div className="proposal-table-wrap">
+            <table aria-label="고위험 변경 요청 목록" className="proposal-table">
+              <thead>
+                <tr>
+                  <th scope="col">작업</th>
+                  <th scope="col">대상</th>
+                  <th scope="col">상세</th>
+                  <th scope="col">상태</th>
+                  <th scope="col">요청자</th>
+                  {canDecide ? <th scope="col">결정</th> : null}
+                </tr>
+              </thead>
+              <tbody>
+                {requests.map((request) => (
+                  <tr key={request.id}>
+                    <td>
+                      <strong>{highRiskOperationLabels[request.operationType]}</strong>
+                      <span>{request.reason || request.id}</span>
+                    </td>
+                    <td>{getHighRiskTargetText(request)}</td>
+                    <td>{getHighRiskPayloadSummary(request)}</td>
+                    <td>
+                      <span className={`status-pill status-${request.status}`}>
+                        {highRiskStatusLabels[request.status]}
+                      </span>
+                    </td>
+                    <td>{request.requestedBy ?? '-'}</td>
+                    {canDecide ? (
+                      <td>
+                        <div className="inline-actions">
+                          <button
+                            type="button"
+                            className="approve-button"
+                            disabled={isMutating || !canSubmitDecision}
+                            onClick={() => onApprove(request.id)}
+                          >
+                            승인 실행
+                          </button>
+                          <button
+                            type="button"
+                            className="reject-button"
+                            disabled={isMutating || !canSubmitDecision || !decisionReason.trim()}
+                            onClick={() => onReject(request.id)}
+                          >
+                            거절 실행
+                          </button>
+                        </div>
+                      </td>
+                    ) : null}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
 // 공지·정책 tab: side-by-side notice and recommendation-policy cards with
 // create + lifecycle (publish/activate/archive) actions for R-ADMIN.
 function OperationsPolicyPanel({
@@ -491,16 +1018,14 @@ function OperationsPolicyPanel({
 }
 
 function DataProposalPanel({
-  currentRole,
+  canSaveProposal,
   isSubmitting,
   onCreateProposal,
 }: {
-  currentRole: AdminRole
+  canSaveProposal: boolean
   isSubmitting: boolean
   onCreateProposal: () => void
 }) {
-  const canSaveProposal = currentRole === 'R-DATA-PROVIDER'
-
   return (
     <section className="panel form-panel" aria-labelledby="proposal-title">
       <div className="section-heading">
@@ -550,7 +1075,7 @@ function DataProposalPanel({
 }
 
 function ReviewQueuePanel({
-  currentRole,
+  canMakeDecision,
   proposals,
   isLoading,
   errorMessage,
@@ -563,7 +1088,7 @@ function ReviewQueuePanel({
   historyItems,
   isHistoryLoading,
 }: {
-  currentRole: AdminRole
+  canMakeDecision: boolean
   proposals: ReviewProposal[]
   isLoading: boolean
   errorMessage: string | null
@@ -577,7 +1102,6 @@ function ReviewQueuePanel({
   isHistoryLoading: boolean
 }) {
   const selectedProposal = proposals[0]
-  const canMakeDecision = currentRole === 'R-ADMIN'
   const canStartReview = selectedProposal?.status === 'submitted'
   const canDecideProposal = selectedProposal?.status === 'in_review'
   const decisionHint = selectedProposal
@@ -941,19 +1465,141 @@ function MonthlyDestinationPanel({
   )
 }
 
+function AdminMfaGate({
+  status,
+  enrollment,
+  recoveryCodes,
+  code,
+  recoveryCode,
+  isLoading,
+  errorMessage,
+  hideRecovery = false,
+  onCodeChange,
+  onRecoveryCodeChange,
+  onEnroll,
+  onConfirm,
+  onVerify,
+  onRecover,
+  onAcknowledgeRecoveryCodes,
+}: {
+  status: AdminMfaStatus | null
+  enrollment: AdminMfaEnrollment | null
+  recoveryCodes: string[]
+  code: string
+  recoveryCode: string
+  isLoading: boolean
+  errorMessage: string | null
+  hideRecovery?: boolean
+  onCodeChange: (value: string) => void
+  onRecoveryCodeChange: (value: string) => void
+  onEnroll: () => void
+  onConfirm: () => void
+  onVerify: () => void
+  onRecover: () => void
+  onAcknowledgeRecoveryCodes: () => void
+}) {
+  return (
+    <section className="panel mfa-panel" aria-labelledby="admin-mfa-title">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Admin Security</p>
+          <h2 id="admin-mfa-title">관리자 추가 인증</h2>
+        </div>
+        <span className="status-pill status-pending">필수</span>
+      </div>
+
+      {errorMessage && <p className="error-text" role="alert">{errorMessage}</p>}
+
+      {recoveryCodes.length > 0 ? (
+        <div className="mfa-recovery-block">
+          <strong>복구 코드</strong>
+          <div className="mfa-code-grid">
+            {recoveryCodes.map((item) => <code key={item}>{item}</code>)}
+          </div>
+          <button type="button" onClick={onAcknowledgeRecoveryCodes}>보관 완료</button>
+        </div>
+      ) : !status && isLoading ? (
+        <p role="status">MFA 상태를 확인하는 중입니다.</p>
+      ) : !status && errorMessage ? (
+        <p>MFA 상태를 확인할 수 없습니다. 모달을 닫고 다시 시도하세요.</p>
+      ) : !status || status.credentialStatus === 'not_enrolled' || status.credentialStatus === 'pending' ? (
+        enrollment ? (
+          <div className="mfa-form-stack">
+            <label>
+              설정 키
+              <input readOnly value={enrollment.secret} />
+            </label>
+            <label>
+              인증 코드
+              <input
+                autoComplete="one-time-code"
+                inputMode="numeric"
+                maxLength={6}
+                onChange={(event) => onCodeChange(event.target.value.replace(/\D/g, ''))}
+                value={code}
+              />
+            </label>
+            <button disabled={isLoading || code.length !== 6} onClick={onConfirm} type="button">등록 확인</button>
+          </div>
+        ) : (
+          <button disabled={isLoading} onClick={onEnroll} type="button">MFA 등록 시작</button>
+        )
+      ) : (
+        <div className="mfa-form-stack">
+          <label>
+            인증 코드
+            <input
+              autoComplete="one-time-code"
+              inputMode="numeric"
+              maxLength={6}
+              onChange={(event) => onCodeChange(event.target.value.replace(/\D/g, ''))}
+              value={code}
+            />
+          </label>
+          <button disabled={isLoading || code.length !== 6} onClick={onVerify} type="button">인증</button>
+          {!hideRecovery ? (
+            <div className="mfa-recovery-row">
+              <input
+                aria-label="복구 코드"
+                onChange={(event) => onRecoveryCodeChange(event.target.value)}
+                placeholder="복구 코드"
+                value={recoveryCode}
+              />
+              <button disabled={isLoading || !recoveryCode.trim()} onClick={onRecover} type="button">복구 코드 사용</button>
+            </div>
+          ) : null}
+        </div>
+      )}
+      {isLoading && <span role="status">처리 중입니다.</span>}
+    </section>
+  )
+}
+
+type PendingDecision = { action: 'approve' | 'reject'; requestId: string; decisionReason: string }
+
 export function AdminDashboard() {
   // Access token drives both the API client (Bearer header) and the session role.
   // Initial value is the cached token (survives refresh); if absent we restore it
   // from /api/v1/auth/session below. getSessionRoles() also falls back to the Vite
   // dev token, so local development still works without a real login.
-  const [accessToken, setAccessToken] = useState<string>(() => getStoredAccessToken())
-  // Session role comes from the token, not a manual switcher, so the UI matches
-  // what the backend will actually allow for this caller.
-  const sessionRoles = useMemo(() => getSessionRoles(accessToken), [accessToken])
+  const [accessToken, setAccessToken] = useState<string>(() => getStoredAccessToken() || getDevAccessToken())
+  const useSamplePreview =
+    import.meta.env.DEV && import.meta.env.VITE_LOVV_USE_SAMPLE_DATA === 'true' && !accessToken
+  // Session roles come from the token, not a manual switcher. currentRole is the
+  // display/default-tab role; tab/action access uses the full role union.
+  const sessionRoles = useMemo(() => {
+    const tokenRoles = getSessionRoles(accessToken)
+    return tokenRoles.length > 0 || !useSamplePreview ? tokenRoles : samplePreviewRoles
+  }, [accessToken, useSamplePreview])
   const currentRole = useMemo(() => resolvePrimaryRole(sessionRoles), [sessionRoles])
   const [activeTab, setActiveTab] = useState<AdminTab>(() =>
     currentRole ? roleDefaultTab[currentRole] : 'metrics',
   )
+  const roleBadgeLabel = currentRole
+    ? sessionRoles.length > 1
+      ? `${currentRole} 외 ${sessionRoles.length - 1}개 역할`
+      : currentRole
+    : '역할 없음'
   const [apiProposals, setApiProposals] = useState<ReviewProposal[]>([])
   const [isProposalLoading, setIsProposalLoading] = useState(true)
   const [proposalError, setProposalError] = useState<string | null>(null)
@@ -976,6 +1622,20 @@ export function AdminDashboard() {
   const [auditEntries, setAuditEntries] = useState<AuditLogEntry[]>([])
   const [isAuditLoading, setIsAuditLoading] = useState(false)
   const [auditError, setAuditError] = useState<string | null>(null)
+  const [highRiskRequests, setHighRiskRequests] = useState<HighRiskChangeRequest[]>([])
+  const [highRiskForm, setHighRiskForm] = useState<HighRiskRequestFormState>(defaultHighRiskForm)
+  const [highRiskDecisionReason, setHighRiskDecisionReason] = useState('')
+  const [isHighRiskLoading, setIsHighRiskLoading] = useState(false)
+  const [isHighRiskMutating, setIsHighRiskMutating] = useState(false)
+  const [highRiskError, setHighRiskError] = useState<string | null>(null)
+  const [mfaPrompt, setMfaPrompt] = useState<{ pending: PendingDecision; notice: string | null } | null>(null)
+  const [mfaStatus, setMfaStatus] = useState<AdminMfaStatus | null>(null)
+  const [mfaEnrollment, setMfaEnrollment] = useState<AdminMfaEnrollment | null>(null)
+  const [mfaRecoveryCodes, setMfaRecoveryCodes] = useState<string[]>([])
+  const [mfaCode, setMfaCode] = useState('')
+  const [mfaRecoveryCode, setMfaRecoveryCode] = useState('')
+  const [isMfaLoading, setIsMfaLoading] = useState(false)
+  const [mfaError, setMfaError] = useState<string | null>(null)
 
   const loadMetrics = useCallback(async () => {
     setIsMetricsLoading(true)
@@ -1021,6 +1681,20 @@ export function AdminDashboard() {
       setAuditEntries([])
     } finally {
       setIsAuditLoading(false)
+    }
+  }, [adminApi])
+
+  const loadHighRiskRequests = useCallback(async () => {
+    setIsHighRiskLoading(true)
+    setHighRiskError(null)
+    try {
+      const items = await adminApi.listHighRiskRequests({ status: 'pending', limit: 50 })
+      setHighRiskRequests(items)
+    } catch (error) {
+      setHighRiskError(error instanceof Error ? error.message : '고위험 요청 목록을 불러오지 못했습니다.')
+      setHighRiskRequests([])
+    } finally {
+      setIsHighRiskLoading(false)
     }
   }, [adminApi])
 
@@ -1127,26 +1801,72 @@ export function AdminDashboard() {
   }, [accessToken, authClient])
 
   useEffect(() => {
-    if (!accessToken || activeTab !== 'metrics' || !currentRole) {
+    if (sessionRoles.length === 0 || isTabAllowed(sessionRoles, activeTab)) {
       return
     }
-    void loadMetrics()
-  }, [accessToken, activeTab, currentRole, loadMetrics])
+    const task = window.setTimeout(() => {
+      setActiveTab(currentRole ? roleDefaultTab[currentRole] : 'metrics')
+    }, 0)
+    return () => window.clearTimeout(task)
+  }, [activeTab, currentRole, sessionRoles])
 
   useEffect(() => {
-    if (!accessToken || activeTab !== 'operations' || currentRole !== 'R-ADMIN') {
+    if (!accessToken || activeTab !== 'metrics' || sessionRoles.length === 0) {
       return
     }
-    void loadOperations()
-  }, [accessToken, activeTab, currentRole, loadOperations])
+    const task = window.setTimeout(() => {
+      void loadMetrics()
+    }, 0)
+    return () => window.clearTimeout(task)
+  }, [accessToken, activeTab, sessionRoles, loadMetrics])
+
+  // Dev preview: seed sample metrics when opted in and no real backend session,
+  // so the Local Metrics panel shows its full dashboard instead of the fallback.
+  useEffect(() => {
+    if (!useSamplePreview) {
+      return
+    }
+    const task = window.setTimeout(() => {
+      setMetricsItems(sampleDestinationMetrics)
+    }, 0)
+    return () => window.clearTimeout(task)
+  }, [useSamplePreview])
+
+  useEffect(() => {
+    if (!accessToken || activeTab !== 'operations' || !hasRole(sessionRoles, 'R-ADMIN')) {
+      return
+    }
+    const task = window.setTimeout(() => {
+      void loadOperations()
+    }, 0)
+    return () => window.clearTimeout(task)
+  }, [accessToken, activeTab, sessionRoles, loadOperations])
 
   // Load the audit trail lazily, only when an admin opens the 감사 로그 tab.
   useEffect(() => {
-    if (!accessToken || activeTab !== 'audit' || currentRole !== 'R-ADMIN') {
+    if (!accessToken || activeTab !== 'audit' || !hasRole(sessionRoles, 'R-ADMIN')) {
       return
     }
-    void loadAudit()
-  }, [accessToken, activeTab, currentRole, loadAudit])
+    const task = window.setTimeout(() => {
+      void loadAudit()
+    }, 0)
+    return () => window.clearTimeout(task)
+  }, [accessToken, activeTab, sessionRoles, loadAudit])
+
+  // Load pending high-risk requests eagerly (not only when the tab is open) so the
+  // "권한 승인" tab can surface a pending-count badge for admins/super-admins.
+  useEffect(() => {
+    if (
+      !accessToken ||
+      (!hasRole(sessionRoles, 'R-ADMIN') && !hasRole(sessionRoles, 'R-SUPER-ADMIN'))
+    ) {
+      return
+    }
+    const task = window.setTimeout(() => {
+      void loadHighRiskRequests()
+    }, 0)
+    return () => window.clearTimeout(task)
+  }, [accessToken, sessionRoles, loadHighRiskRequests])
 
   const loadProposals = useCallback(async () => {
     setIsProposalLoading(true)
@@ -1163,11 +1883,18 @@ export function AdminDashboard() {
   }, [adminApi])
 
   useEffect(() => {
-    if (!accessToken || !currentRole) {
-      setIsProposalLoading(false)
-      return
+    if (!accessToken || sessionRoles.length === 0) {
+      // Dev preview: with no real Bearer token the API is never called, so seed
+      // sample proposals when explicitly opted in (VITE_LOVV_USE_SAMPLE_DATA=true).
+      const shouldSeed = useSamplePreview
+      const task = window.setTimeout(() => {
+        if (shouldSeed) {
+          setApiProposals(sampleProposals)
+        }
+        setIsProposalLoading(false)
+      }, 0)
+      return () => window.clearTimeout(task)
     }
-
     let isCurrent = true
 
     adminApi
@@ -1192,7 +1919,7 @@ export function AdminDashboard() {
     return () => {
       isCurrent = false
     }
-  }, [accessToken, adminApi, currentRole])
+  }, [accessToken, adminApi, sessionRoles, useSamplePreview])
 
   const [publishJobs, setPublishJobs] = useState<PublishJob[]>([])
   const [jobsDestinationId, setJobsDestinationId] = useState<string | null>(null)
@@ -1260,7 +1987,10 @@ export function AdminDashboard() {
     if (!accessToken || activeTab !== 'publish') {
       return
     }
-    void loadMonthly()
+    const task = window.setTimeout(() => {
+      void loadMonthly()
+    }, 0)
+    return () => window.clearTimeout(task)
   }, [accessToken, activeTab, loadMonthly])
 
   const handleMonthlyTransition = useCallback(
@@ -1283,6 +2013,212 @@ export function AdminDashboard() {
     },
     [adminApi, loadMonthly, jobsDestinationId, loadPublishJobs],
   )
+
+  function buildHighRiskRequestInput(): HighRiskChangeRequestInput {
+    const operationType = highRiskForm.operationType
+    const input: HighRiskChangeRequestInput = {
+      operationType,
+      reason: highRiskForm.reason.trim(),
+    }
+    if (isRoleHighRiskOperation(operationType)) {
+      input.targetUserId = highRiskForm.targetUserId.trim()
+      input.roleCode = highRiskForm.roleCode
+      if (highRiskForm.organizationId.trim() && highRiskForm.roleCode !== 'R-SUPER-ADMIN') {
+        input.organizationId = highRiskForm.organizationId.trim()
+      }
+      if (operationType === 'role_grant' && highRiskForm.validUntil.trim()) {
+        input.validUntil = highRiskForm.validUntil.trim()
+      }
+    } else if (isRegionHighRiskOperation(operationType)) {
+      input.targetUserId = highRiskForm.targetUserId.trim()
+      input.regionId = highRiskForm.regionId.trim()
+      if (highRiskForm.organizationId.trim()) {
+        input.organizationId = highRiskForm.organizationId.trim()
+      }
+      if (operationType === 'region_grant' && highRiskForm.validUntil.trim()) {
+        input.validUntil = highRiskForm.validUntil.trim()
+      }
+    } else {
+      input.destinationIds = Array.from(
+        new Set(
+          highRiskForm.destinationIds
+            .split(/[\s,]+/)
+            .map((item) => item.trim())
+            .filter(Boolean),
+        ),
+      )
+    }
+    return input
+  }
+
+  async function handleCreateHighRiskRequest() {
+    setIsHighRiskMutating(true)
+    setHighRiskError(null)
+    try {
+      const request = await adminApi.createHighRiskRequest(buildHighRiskRequestInput())
+      setHighRiskRequests((items) => [request, ...items.filter((item) => item.id !== request.id)])
+      setHighRiskForm(defaultHighRiskForm)
+    } catch (error) {
+      setHighRiskError(error instanceof Error ? error.message : '고위험 요청 생성에 실패했습니다.')
+    } finally {
+      setIsHighRiskMutating(false)
+    }
+  }
+
+  // Perform the actual approve/reject call (assumes a valid MFA session already exists).
+  async function runHighRiskDecision(action: 'approve' | 'reject', requestId: string, decisionReason: string) {
+    if (action === 'approve') {
+      await adminApi.approveHighRiskRequest(requestId, decisionReason ? { decisionReason } : {})
+    } else {
+      await adminApi.rejectHighRiskRequest(requestId, { decisionReason })
+    }
+    setHighRiskDecisionReason('')
+    await loadHighRiskRequests()
+  }
+
+  function openDecisionMfaPrompt(pending: PendingDecision, notice: string | null) {
+    setMfaCode('')
+    setMfaRecoveryCode('')
+    setMfaRecoveryCodes([])
+    setMfaEnrollment(null)
+    setMfaStatus(null)
+    setMfaError(null)
+    setIsMfaLoading(true)
+    // Populate the credential status so the modal shows enroll vs. verify correctly.
+    void adminApi
+      .getMfaStatus()
+      .then((status) => setMfaStatus(status))
+      .catch((error) => {
+        setMfaStatus(null)
+        setMfaError(error instanceof Error ? error.message : 'MFA 상태를 확인하지 못했습니다.')
+      })
+      .finally(() => setIsMfaLoading(false))
+    setMfaPrompt({ pending, notice })
+  }
+
+  function closeDecisionMfaPrompt() {
+    setMfaPrompt(null)
+    setMfaCode('')
+    setMfaRecoveryCode('')
+    setMfaRecoveryCodes([])
+    setMfaEnrollment(null)
+    setMfaError(null)
+  }
+
+  // MFA is enforced by the backend only at approve/reject time. Map the backend's
+  // 403 codes to the right recovery UI instead of pre-verifying on the client.
+  function handleHighRiskDecisionError(error: unknown, pending: PendingDecision) {
+    if (error instanceof AdminApiError) {
+      if (error.code === 'ADMIN_MFA_REQUIRED') {
+        openDecisionMfaPrompt(pending, null)
+        return
+      }
+      if (error.code === 'ADMIN_MFA_TOTP_REQUIRED') {
+        openDecisionMfaPrompt(pending, '복구 코드로는 승인/거절할 수 없습니다. 인증 앱의 TOTP 코드를 입력하세요.')
+        return
+      }
+      if (error.code === 'ADMIN_MFA_ENROLLMENT_REQUIRED') {
+        openDecisionMfaPrompt(pending, 'MFA 등록이 필요합니다. 등록을 완료한 뒤 다시 시도하세요.')
+        return
+      }
+      if (error.code === 'SUPER_ADMIN_REQUIRED') {
+        setHighRiskError('슈퍼관리자 전용 작업입니다.')
+        return
+      }
+      if (error.code === 'ADMIN_MFA_LOCKED' || error.status === 429) {
+        setHighRiskError('추가 인증이 잠겼습니다. 잠시 후 다시 시도하세요.')
+        return
+      }
+    }
+    setHighRiskError(error instanceof Error ? error.message : '고위험 요청 결정에 실패했습니다.')
+  }
+
+  async function handleHighRiskDecision(action: 'approve' | 'reject', requestId: string) {
+    const decisionReason = highRiskDecisionReason.trim()
+    if (action === 'reject' && !decisionReason) {
+      setHighRiskError('거절 사유를 입력해야 합니다.')
+      return
+    }
+    setIsHighRiskMutating(true)
+    setHighRiskError(null)
+    try {
+      await runHighRiskDecision(action, requestId, decisionReason)
+    } catch (error) {
+      handleHighRiskDecisionError(error, { action, requestId, decisionReason })
+    } finally {
+      setIsHighRiskMutating(false)
+    }
+  }
+
+  // Called from the MFA modal: create a fresh TOTP session, then retry the pending decision.
+  async function handleDecisionMfaVerify() {
+    setIsMfaLoading(true)
+    setMfaError(null)
+    try {
+      setMfaStatus(await adminApi.verifyMfa(mfaCode))
+      setMfaCode('')
+      const pending = mfaPrompt?.pending
+      if (pending) {
+        setIsHighRiskMutating(true)
+        try {
+          await runHighRiskDecision(pending.action, pending.requestId, pending.decisionReason)
+          setMfaPrompt(null)
+        } finally {
+          setIsHighRiskMutating(false)
+        }
+      }
+    } catch (error) {
+      if (error instanceof AdminApiError && error.code === 'ADMIN_MFA_TOTP_REQUIRED') {
+        setMfaError('인증 앱의 TOTP 코드가 필요합니다. 복구 코드로는 승인/거절할 수 없습니다.')
+      } else {
+        setMfaError(error instanceof Error ? error.message : 'MFA 인증에 실패했습니다.')
+      }
+    } finally {
+      setIsMfaLoading(false)
+    }
+  }
+
+  async function handleMfaEnroll() {
+    setIsMfaLoading(true)
+    setMfaError(null)
+    try {
+      setMfaEnrollment(await adminApi.enrollMfa())
+      setMfaCode('')
+    } catch (error) {
+      setMfaError(error instanceof Error ? error.message : 'MFA 등록을 시작하지 못했습니다.')
+    } finally {
+      setIsMfaLoading(false)
+    }
+  }
+
+  async function handleMfaConfirm() {
+    setIsMfaLoading(true)
+    setMfaError(null)
+    try {
+      const result = await adminApi.confirmMfa(mfaCode)
+      setMfaStatus(result.status)
+      setMfaRecoveryCodes(result.recoveryCodes)
+      setMfaEnrollment(null)
+      setMfaCode('')
+    } catch (error) {
+      setMfaError(error instanceof Error ? error.message : 'MFA 등록을 확인하지 못했습니다.')
+    } finally {
+      setIsMfaLoading(false)
+    }
+  }
+
+  async function handleMfaRecover() {
+    setIsMfaLoading(true)
+    setMfaError(null)
+    try {
+      setMfaStatus(await adminApi.recoverMfa(mfaRecoveryCode))
+      setMfaRecoveryCode('')
+    } catch (error) {
+      setMfaError(error instanceof Error ? error.message : '복구 코드 인증에 실패했습니다.')
+    } finally {
+      setIsMfaLoading(false)
+    }
+  }
 
   async function handleCreateProposal() {
     setIsProposalMutating(true)
@@ -1348,6 +2284,7 @@ export function AdminDashboard() {
   }
 
   return (
+    <>
     <main className="app-shell" data-testid="lovv-admin-shell" data-theme="lovv">
       <header className="topbar">
         <div>
@@ -1362,19 +2299,25 @@ export function AdminDashboard() {
             <strong>운영자 콘솔 세션</strong>
             <span className="session-type">API Session Preview</span>
             <span className="current-role-badge" data-testid="current-role-badge">
-              현재 {currentRole ?? '역할 없음'}
+              현재 {roleBadgeLabel}
             </span>
-            <span className="role-source-note">세션 역할은 액세스 토큰에서 확인됩니다.</span>
+            <span className="role-source-note">
+              {useSamplePreview
+                ? '개발 샘플 모드의 프리뷰 역할을 사용 중입니다.'
+                : '세션 역할은 액세스 토큰에서 확인됩니다.'}
+            </span>
           </div>
         </div>
       </header>
 
-      <SummaryCards />
+      <SummaryCards proposals={apiProposals} isLoading={isProposalLoading} />
+
+      <ProposalInsights proposals={apiProposals} isLoading={isProposalLoading} />
 
       <nav className="tab-list" role="tablist" aria-label="관리자 콘솔 메뉴">
         {tabs.map((tab) => {
-          const tabAllowed = isTabAllowed(currentRole, tab.id)
-          const lockReason = getTabLockReason(currentRole, tab.label)
+          const tabAllowed = isTabAllowed(sessionRoles, tab.id)
+          const lockReason = getTabLockReason(sessionRoles, tab.label)
           const lockReasonId = `admin-tab-${tab.id}-lock-reason`
 
           return (
@@ -1398,6 +2341,14 @@ export function AdminDashboard() {
               type="button"
             >
               <span className="tab-label">{tab.label}</span>
+              {tab.id === 'highRisk' && tabAllowed && highRiskRequests.length > 0 ? (
+                <span
+                  className="tab-pending-badge"
+                  aria-label={`승인 대기 ${formatPendingCountText(highRiskRequests.length)}`}
+                >
+                  {formatPendingBadge(highRiskRequests.length)}
+                </span>
+              ) : null}
               {!tabAllowed && (
                 <>
                   <span className="tab-lock" aria-hidden="true">
@@ -1414,7 +2365,7 @@ export function AdminDashboard() {
       </nav>
 
       <div aria-labelledby={`admin-tab-${activeTab}`} className="tab-panel" id={activePanelId} role="tabpanel">
-        {!currentRole ? (
+        {sessionRoles.length === 0 ? (
           <NoSessionRolePanel />
         ) : (
           <>
@@ -1431,14 +2382,14 @@ export function AdminDashboard() {
             )}
             {activeTab === 'proposal' && (
               <DataProposalPanel
-                currentRole={currentRole}
+                canSaveProposal={hasRole(sessionRoles, 'R-DATA-PROVIDER')}
                 isSubmitting={isProposalMutating}
                 onCreateProposal={handleCreateProposal}
               />
             )}
             {activeTab === 'review' && (
               <ReviewQueuePanel
-                currentRole={currentRole}
+                canMakeDecision={hasRole(sessionRoles, 'R-ADMIN')}
                 proposals={apiProposals}
                 isLoading={isProposalLoading}
                 errorMessage={proposalError}
@@ -1458,7 +2409,7 @@ export function AdminDashboard() {
                 isLoading={isMonthlyLoading}
                 errorMessage={monthlyError}
                 isMutating={isMonthlyMutating}
-                canManage={currentRole === 'R-ADMIN'}
+                canManage={hasRole(sessionRoles, 'R-ADMIN')}
                 onTransition={(destinationId, action) => void handleMonthlyTransition(destinationId, action)}
                 onRefresh={() => void loadMonthly()}
                 jobs={publishJobs}
@@ -1483,6 +2434,24 @@ export function AdminDashboard() {
                 onTransitionPolicy={(policyId, action) => void handleTransitionPolicy(policyId, action)}
               />
             )}
+            {activeTab === 'highRisk' && (
+              <HighRiskRequestPanel
+                requests={highRiskRequests}
+                form={highRiskForm}
+                decisionReason={highRiskDecisionReason}
+                isLoading={isHighRiskLoading}
+                isMutating={isHighRiskMutating}
+                errorMessage={highRiskError}
+                canCreate={hasRole(sessionRoles, 'R-ADMIN') || hasRole(sessionRoles, 'R-SUPER-ADMIN')}
+                canDecide={hasRole(sessionRoles, 'R-SUPER-ADMIN')}
+                onFormChange={setHighRiskForm}
+                onDecisionReasonChange={setHighRiskDecisionReason}
+                onCreate={() => void handleCreateHighRiskRequest()}
+                onApprove={(requestId) => void handleHighRiskDecision('approve', requestId)}
+                onReject={(requestId) => void handleHighRiskDecision('reject', requestId)}
+                onRefresh={() => void loadHighRiskRequests()}
+              />
+            )}
             {activeTab === 'audit' && (
               <AuditLogPanel
                 entries={auditEntries}
@@ -1495,5 +2464,50 @@ export function AdminDashboard() {
         )}
       </div>
     </main>
+    {mfaPrompt ? (
+      <div className="modal-backdrop" role="presentation">
+        <div
+          aria-labelledby="decision-mfa-title"
+          aria-modal="true"
+          className="mfa-modal"
+          role="dialog"
+        >
+          <div className="modal-heading">
+            <div>
+              <p className="eyebrow">High-risk decision</p>
+              <h2 id="decision-mfa-title">승인 추가 인증</h2>
+            </div>
+            <button
+              aria-label="MFA 모달 닫기"
+              className="ghost-button"
+              disabled={isMfaLoading || isHighRiskMutating}
+              onClick={closeDecisionMfaPrompt}
+              type="button"
+            >
+              닫기
+            </button>
+          </div>
+          {mfaPrompt.notice ? <p className="mfa-notice">{mfaPrompt.notice}</p> : null}
+          <AdminMfaGate
+            status={mfaStatus}
+            enrollment={mfaEnrollment}
+            recoveryCodes={mfaRecoveryCodes}
+            code={mfaCode}
+            recoveryCode={mfaRecoveryCode}
+            isLoading={isMfaLoading || isHighRiskMutating}
+            errorMessage={mfaError}
+            hideRecovery
+            onCodeChange={setMfaCode}
+            onRecoveryCodeChange={setMfaRecoveryCode}
+            onEnroll={() => void handleMfaEnroll()}
+            onConfirm={() => void handleMfaConfirm()}
+            onVerify={() => void handleDecisionMfaVerify()}
+            onRecover={() => void handleMfaRecover()}
+            onAcknowledgeRecoveryCodes={() => setMfaRecoveryCodes([])}
+          />
+        </div>
+      </div>
+    ) : null}
+    </>
   )
 }

@@ -17,6 +17,20 @@ const apiProposal = {
   submittedAt: '2026-06-23T09:00:00Z',
 }
 
+const highRiskRequest = {
+  id: 'high-risk-1',
+  operationType: 'role_grant',
+  targetUserId: 'target-1',
+  payload: {
+    targetUserId: 'target-1',
+    roleCode: 'R-LOCAL-OPERATOR',
+  },
+  status: 'pending',
+  reason: '운영 담당자 권한 부여',
+  requestedBy: 'admin-1',
+  requestedAt: '2026-06-30T02:00:00Z',
+}
+
 // Build an unsigned JWT-shaped token. The console only base64-decodes the payload
 // to read roles for UI gating; the signature is never verified in the browser.
 function base64url(input: string) {
@@ -29,8 +43,12 @@ function makeToken(roles: string[]) {
   return `${header}.${payload}.signature`
 }
 
+function useSessionRoles(roles: string[]) {
+  vi.stubEnv('VITE_LOVV_ADMIN_ACCESS_TOKEN', makeToken(roles))
+}
+
 function useSessionRole(role: string) {
-  vi.stubEnv('VITE_LOVV_ADMIN_ACCESS_TOKEN', makeToken([role]))
+  useSessionRoles([role])
 }
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
@@ -58,10 +76,30 @@ function defaultAdminFetch(input: RequestInfo | URL) {
   return jsonResponse({ items: [] })
 }
 
+const verifiedMfaStatus = {
+  enrolled: true,
+  credentialStatus: 'active',
+  sessionVerified: true,
+  sessionVerifiedAt: '2026-06-30T09:00:00Z',
+  sessionExpiresAt: '2026-06-30T21:00:00Z',
+  recoveryCodesRemaining: 8,
+}
+
+function withVerifiedMfa(
+  handler: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+) {
+  return (input: RequestInfo | URL, init?: RequestInit) => {
+    if (requestUrl(input).includes('/api/v1/admin/security/mfa/status')) {
+      return jsonResponse({ mfa: verifiedMfaStatus })
+    }
+    return handler(input, init)
+  }
+}
+
 describe('Lovv admin console', () => {
   beforeEach(() => {
     useSessionRole('R-ADMIN')
-    vi.stubGlobal('fetch', vi.fn(defaultAdminFetch))
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(defaultAdminFetch)))
   })
 
   afterEach(() => {
@@ -70,7 +108,7 @@ describe('Lovv admin console', () => {
     clearAccessToken()
   })
 
-  it('renders the admin workflow overview with role-based lanes', () => {
+  it('renders the admin workflow overview with role-based lanes', async () => {
     render(<App />)
 
     expect(screen.getByTestId('lovv-admin-shell')).toHaveAttribute('data-theme', 'lovv')
@@ -79,14 +117,74 @@ describe('Lovv admin console', () => {
     expect(screen.getByRole('tab', { name: '데이터 제안' })).toBeDisabled()
     expect(screen.getByRole('tab', { name: '제안 검토' })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: '반영 상태' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: '권한 승인' })).toBeInTheDocument()
     expect(screen.getByTestId('current-role-badge')).toHaveTextContent('R-ADMIN')
 
-    expect(screen.getByText('R-LOCAL-OPERATOR')).toBeInTheDocument()
+    expect(await screen.findByText('R-LOCAL-OPERATOR')).toBeInTheDocument()
     expect(screen.getByText('R-DATA-PROVIDER')).toBeInTheDocument()
     expect(screen.getByText('R-ADMIN')).toBeInTheDocument()
+    expect(screen.getByText('R-SUPER-ADMIN')).toBeInTheDocument()
     expect(screen.getByText('제출 제안')).toBeInTheDocument()
     expect(screen.getByText('승인 완료')).toBeInTheDocument()
     expect(screen.getByText('반려/수정 요청')).toBeInTheDocument()
+  })
+
+  it('shows sample proposals and metrics without a backend token in dev preview mode', async () => {
+    vi.stubEnv('VITE_LOVV_ADMIN_ACCESS_TOKEN', '')
+    vi.stubEnv('VITE_LOVV_USE_SAMPLE_DATA', 'true')
+    vi.stubEnv('DEV', true)
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      void input
+      return jsonResponse(
+        { error: { code: 'UNAUTHORIZED', message: 'Authentication is required' } },
+        { status: 401 },
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+
+    expect(screen.getByTestId('current-role-badge')).toHaveTextContent('R-SUPER-ADMIN 외 3개 역할')
+    expect(screen.getByText('개발 샘플 모드의 프리뷰 역할을 사용 중입니다.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: '제안 검토' }))
+    const proposalTable = await screen.findByRole('table', { name: '데이터 제안 목록' })
+    expect(await within(proposalTable).findByText('제주 동백 군락지 겨울 투어')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: '운영 지표' }))
+    const metricsTable = await screen.findByRole('table', { name: '담당 지역 운영 지표' })
+    expect(await within(metricsTable).findByText('제주')).toBeInTheDocument()
+    expect(await within(metricsTable).findByText('12840')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([input]) => requestUrl(input).includes('/api/v1/admin/'))).toBe(false)
+  })
+
+  it('loads high-risk requests for admins even when MFA is not enrolled', async () => {
+    const fetchMock = vi.fn((...args: [RequestInfo | URL, RequestInit?]) => {
+      const [input] = args
+      const url = requestUrl(input)
+      if (url.endsWith('/api/v1/admin/security/mfa/status')) {
+        return jsonResponse({
+          mfa: {
+            enrolled: false,
+            credentialStatus: 'not_enrolled',
+            sessionVerified: false,
+            recoveryCodesRemaining: 0,
+          },
+        })
+      }
+      if (url.includes('/api/v1/admin/high-risk-requests')) {
+        return jsonResponse({ items: [highRiskRequest], nextCursor: null })
+      }
+      return defaultAdminFetch(input)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+
+    expect(await screen.findByText('R-LOCAL-OPERATOR')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '관리자 추가 인증' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: '권한 승인' }))
+    const table = await screen.findByRole('table', { name: '고위험 변경 요청 목록' })
+    expect(within(table).getByText('역할 부여')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/admin/high-risk-requests'))).toBe(true)
   })
 
   it('locks proposal access for an admin session token', () => {
@@ -115,6 +213,145 @@ describe('Lovv admin console', () => {
     expect(screen.getByRole('button', { name: '제안 등록' })).toBeEnabled()
     expect(screen.getByRole('tab', { name: '제안 검토' })).toBeDisabled()
     expect(screen.queryByRole('button', { name: '승인' })).not.toBeInTheDocument()
+  })
+
+  it('uses the union of tabs for sessions with multiple admin roles', async () => {
+    useSessionRoles(['R-ADMIN', 'R-DATA-PROVIDER'])
+
+    render(<App />)
+
+    expect(screen.getByTestId('current-role-badge')).toHaveTextContent('R-ADMIN')
+    expect(screen.getByRole('tab', { name: '운영 지표' })).toBeEnabled()
+    expect(screen.getByRole('tab', { name: '데이터 제안' })).toBeEnabled()
+    expect(screen.getByRole('tab', { name: '제안 검토' })).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('tab', { name: '데이터 제안' }))
+    expect(await screen.findByRole('button', { name: '제안 등록' })).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('tab', { name: '제안 검토' }))
+    expect(await screen.findByRole('button', { name: '검토 시작' })).toBeEnabled()
+  })
+
+  it('lists high-risk requests for regular admins but hides super-admin decisions', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = requestUrl(input)
+      if (url.includes('/api/v1/admin/high-risk-requests')) {
+        return jsonResponse({ items: [highRiskRequest], nextCursor: null })
+      }
+      return defaultAdminFetch(input)
+    })
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(fetchMock)))
+
+    render(<App />)
+    fireEvent.click(screen.getByRole('tab', { name: '권한 승인' }))
+
+    expect(await screen.findByRole('heading', { name: '권한 승인 요청' })).toBeInTheDocument()
+    const table = await screen.findByRole('table', { name: '고위험 변경 요청 목록' })
+    expect(within(table).getByText('역할 부여')).toBeInTheDocument()
+    expect(within(table).getByText('target-1')).toBeInTheDocument()
+    expect(within(table).queryByRole('button', { name: '승인 실행' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '고위험 요청 생성' })).toBeDisabled()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/admin/high-risk-requests'))).toBe(true)
+  })
+
+  it('creates high-risk requests without client-owned authority fields', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input)
+      if (url.endsWith('/api/v1/admin/high-risk-requests') && init?.method === 'POST') {
+        return jsonResponse({ request: highRiskRequest }, { status: 201 })
+      }
+      if (url.includes('/api/v1/admin/high-risk-requests')) {
+        return jsonResponse({ items: [], nextCursor: null })
+      }
+      return defaultAdminFetch(input)
+    })
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(fetchMock)))
+
+    render(<App />)
+    fireEvent.click(screen.getByRole('tab', { name: '권한 승인' }))
+    await screen.findByRole('heading', { name: '권한 승인 요청' })
+    fireEvent.change(screen.getByLabelText('대상 사용자 ID'), { target: { value: 'target-1' } })
+    fireEvent.change(screen.getByLabelText('요청 사유'), { target: { value: '운영 담당자 권한 부여' } })
+    fireEvent.click(screen.getByRole('button', { name: '고위험 요청 생성' }))
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input, init]) =>
+          String(input).endsWith('/api/v1/admin/high-risk-requests') &&
+          (init as RequestInit | undefined)?.method === 'POST',
+        ),
+      ).toBe(true),
+    )
+    const createCall = fetchMock.mock.calls.find(([input, init]) =>
+      String(input).endsWith('/api/v1/admin/high-risk-requests') &&
+      (init as RequestInit | undefined)?.method === 'POST',
+    )
+    const body = JSON.parse(String((createCall?.[1] as RequestInit).body))
+    expect(body).toEqual({
+      operationType: 'role_grant',
+      targetUserId: 'target-1',
+      roleCode: 'R-LOCAL-OPERATOR',
+      reason: '운영 담당자 권한 부여',
+    })
+    expect(body).not.toHaveProperty('requestedBy')
+    expect(body).not.toHaveProperty('decidedBy')
+    expect(body).not.toHaveProperty('roles')
+  })
+
+  it('lets super admins approve high-risk requests only after TOTP verification', async () => {
+    useSessionRole('R-SUPER-ADMIN')
+    let approveCalls = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input)
+      if (url.endsWith('/api/v1/admin/security/mfa/verify')) {
+        return jsonResponse({ mfa: verifiedMfaStatus })
+      }
+      if (url.endsWith('/api/v1/admin/high-risk-requests/high-risk-1/approve') && init?.method === 'POST') {
+        approveCalls += 1
+        if (approveCalls === 1) {
+          return jsonResponse(
+            { error: { code: 'ADMIN_MFA_REQUIRED', message: 'MFA 인증이 필요합니다.' } },
+            { status: 403 },
+          )
+        }
+        return jsonResponse({ request: { ...highRiskRequest, status: 'executed', decidedBy: 'super-1' } })
+      }
+      if (url.includes('/api/v1/admin/high-risk-requests')) {
+        return jsonResponse({ items: [highRiskRequest], nextCursor: null })
+      }
+      return defaultAdminFetch(input)
+    })
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(fetchMock)))
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '권한 승인 요청' })).toBeInTheDocument()
+    expect(screen.getByTestId('current-role-badge')).toHaveTextContent('R-SUPER-ADMIN')
+    const table = await screen.findByRole('table', { name: '고위험 변경 요청 목록' })
+    expect(within(table).getByRole('button', { name: '승인 실행' })).toBeEnabled()
+    fireEvent.click(within(table).getByRole('button', { name: '승인 실행' }))
+    const dialog = await screen.findByRole('dialog', { name: '승인 추가 인증' })
+    fireEvent.change(within(dialog).getByLabelText('인증 코드'), { target: { value: '123456' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: '인증' }))
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([input, init]) =>
+          String(input).endsWith('/api/v1/admin/high-risk-requests/high-risk-1/approve') &&
+          (init as RequestInit | undefined)?.method === 'POST',
+        ),
+      ).toHaveLength(2),
+    )
+    const verifyIndex = fetchMock.mock.calls.findIndex(([input]) =>
+      String(input).endsWith('/api/v1/admin/security/mfa/verify'),
+    )
+    const approveIndex = fetchMock.mock.calls
+      .map(([input], index) => ({ input, index }))
+      .filter(({ input }) => String(input).endsWith('/api/v1/admin/high-risk-requests/high-risk-1/approve'))
+      .at(-1)?.index ?? -1
+    expect(verifyIndex).toBeGreaterThanOrEqual(0)
+    expect(approveIndex).toBeGreaterThan(verifyIndex)
+    expect(JSON.parse(String((fetchMock.mock.calls[approveIndex][1] as RequestInit).body))).toEqual({})
   })
 
   it('locks every workspace when the token carries no known admin role', () => {
@@ -159,7 +396,7 @@ describe('Lovv admin console', () => {
       }
       return jsonResponse({ items: [] })
     })
-    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(fetchMock)))
 
     render(<App />)
 
@@ -187,7 +424,7 @@ describe('Lovv admin console', () => {
       }
       return jsonResponse({ items: [] })
     })
-    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(fetchMock)))
 
     render(<App />)
     fireEvent.click(screen.getByRole('button', { name: '제안 등록' }))
@@ -227,12 +464,12 @@ describe('Lovv admin console', () => {
     fireEvent.click(screen.getByRole('tab', { name: '제안 검토' }))
 
     const queue = await screen.findByRole('table', { name: '데이터 제안 목록' })
-    expect(within(queue).getByText('강릉 커피축제 공식 정보 갱신')).toBeInTheDocument()
+    expect(await within(queue).findByText('강릉 커피축제 공식 정보 갱신')).toBeInTheDocument()
     expect(within(queue).getByText('submitted')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '승인 여부' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '검토 시작' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: '승인' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: '반려' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '승인' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '반려' })).toBeDisabled()
     expect(screen.getByText('제안자에게 사유 표시')).toBeInTheDocument()
   })
 
@@ -250,12 +487,12 @@ describe('Lovv admin console', () => {
       }
       return jsonResponse({ items: [] })
     })
-    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(fetchMock)))
 
     render(<App />)
     fireEvent.click(screen.getByRole('tab', { name: '제안 검토' }))
     const queue = await screen.findByRole('table', { name: '데이터 제안 목록' })
-    expect(within(queue).getByText('강릉 커피축제 공식 정보 갱신')).toBeInTheDocument()
+    expect(await within(queue).findByText('강릉 커피축제 공식 정보 갱신')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '검토 시작' }))
 
     await waitFor(() =>
@@ -271,6 +508,9 @@ describe('Lovv admin console', () => {
     )
     expect(reviewCall?.[0]).toBe('/api/v1/admin/data-proposals/proposal-1/review')
     expect((reviewCall?.[1] as RequestInit).method).toBe('POST')
+    const body = JSON.parse(String((reviewCall?.[1] as RequestInit).body))
+    expect(body).not.toHaveProperty('reviewedBy')
+    expect(body).not.toHaveProperty('roles')
   })
 
   it('loads proposal history through the admin API', async () => {
@@ -301,11 +541,12 @@ describe('Lovv admin console', () => {
       }
       return jsonResponse({ items: [] })
     })
-    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(fetchMock)))
 
     render(<App />)
     fireEvent.click(screen.getByRole('tab', { name: '제안 검토' }))
-    await screen.findByRole('table', { name: '데이터 제안 목록' })
+    const queue = await screen.findByRole('table', { name: '데이터 제안 목록' })
+    await within(queue).findByText('강릉 커피축제 공식 정보 갱신')
     fireEvent.click(screen.getByRole('button', { name: '이력 조회' }))
 
     expect(await screen.findByLabelText('제안 변경 이력')).toHaveTextContent('submitted')
@@ -321,6 +562,9 @@ describe('Lovv admin console', () => {
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
         const url = requestUrl(input)
+        if (url.includes('/api/v1/admin/security/mfa/status')) {
+          return jsonResponse({ mfa: verifiedMfaStatus })
+        }
         if (url.includes('/api/v1/admin/metrics/destinations')) {
           return jsonResponse({ items: [] })
         }
@@ -347,14 +591,15 @@ describe('Lovv admin console', () => {
       themeCodes: ['coffee', 'festival'],
       status: 'candidate',
     }
-    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const fetchMock = vi.fn((...args: [RequestInfo | URL, RequestInit?]) => {
+      const [input] = args
       const url = typeof input === 'string' ? input : input.toString()
       if (url.includes('/api/v1/admin/monthly-destinations')) {
         return jsonResponse({ items: [monthly] })
       }
       return jsonResponse({ items: [] })
     })
-    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(fetchMock)))
 
     render(<App />)
     fireEvent.click(screen.getByRole('tab', { name: '반영 상태' }))
@@ -382,7 +627,8 @@ describe('Lovv admin console', () => {
       themeCodes: ['coffee'],
       status: 'candidate',
     }
-    const fetchMock = vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
+    const fetchMock = vi.fn((...args: [RequestInfo | URL, RequestInit?]) => {
+      const [input] = args
       const url = typeof input === 'string' ? input : input.toString()
       if (url.includes('/monthly-destinations/monthly-1/publish')) {
         return jsonResponse({ destination: { ...candidate, status: 'published' } })
@@ -392,7 +638,7 @@ describe('Lovv admin console', () => {
       }
       return jsonResponse({ items: [] })
     })
-    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(fetchMock)))
 
     render(<App />)
     fireEvent.click(screen.getByRole('tab', { name: '반영 상태' }))
@@ -419,7 +665,7 @@ describe('Lovv admin console', () => {
       }
       return jsonResponse({ items: [] })
     })
-    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(fetchMock)))
 
     render(<App />)
 
@@ -455,7 +701,7 @@ describe('Lovv admin console', () => {
       }
       return jsonResponse({ items: [] })
     })
-    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(fetchMock)))
 
     render(<App />)
     fireEvent.click(screen.getByRole('tab', { name: '반영 상태' }))
@@ -499,7 +745,7 @@ describe('Lovv admin console', () => {
       }
       return jsonResponse({ items: [] })
     })
-    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(fetchMock)))
 
     render(<App />)
     fireEvent.click(screen.getByRole('tab', { name: '공지·정책' }))
@@ -532,7 +778,7 @@ describe('Lovv admin console', () => {
       }
       return jsonResponse({ items: [] })
     })
-    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(fetchMock)))
 
     render(<App />)
     fireEvent.click(screen.getByRole('tab', { name: '감사 로그' }))
