@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { adaptAdminProposal, adaptDestinationMetricsSummary, createAdminApiClient } from './adminApi'
+import { adaptAdminProposal, adaptDestinationMetricsSummary, adaptHighRiskRequest, createAdminApiClient } from './adminApi'
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return Promise.resolve(
@@ -12,6 +12,20 @@ function jsonResponse(body: unknown, init: ResponseInit = {}) {
 }
 
 describe('adminApi', () => {
+  it('uses admin security endpoints for MFA enrollment and verification', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ enrollment: { secret: 'SECRET', provisioningUri: 'otpauth://totp/Lovv' } }))
+      .mockResolvedValueOnce(jsonResponse({ mfa: { enrolled: true, credentialStatus: 'active', sessionVerified: true, recoveryCodesRemaining: 8 } }))
+    const client = createAdminApiClient({ accessToken: 'access-token', fetchImpl })
+
+    await client.enrollMfa()
+    await client.verifyMfa('123456')
+
+    expect(fetchImpl.mock.calls[0][0]).toBe('/api/v1/admin/security/mfa/enroll')
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1].body))).toEqual({ code: '123456' })
+    expect((fetchImpl.mock.calls[1][1].headers as Headers).get('Authorization')).toBe('Bearer access-token')
+  })
+
   it('lists admin proposals with bearer authorization and adapter shape', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse({
@@ -105,6 +119,51 @@ describe('adminApi', () => {
     })
   })
 
+  it('surfaces self-review authorization failures without remapping the code', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        {
+          error: {
+            code: 'SELF_REVIEW_FORBIDDEN',
+            message: 'The proposal author cannot review this proposal.',
+          },
+        },
+        { status: 403 },
+      ),
+    )
+    const client = createAdminApiClient({ fetchImpl })
+
+    await expect(client.approveProposal('proposal-1', '승인합니다.')).rejects.toMatchObject({
+      name: 'AdminApiError',
+      status: 403,
+      code: 'SELF_REVIEW_FORBIDDEN',
+      message: 'The proposal author cannot review this proposal.',
+    })
+  })
+
+  it('sends review mutations without client-owned authority fields', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({
+        proposal: {
+          proposalId: 'proposal-1',
+          title: '강릉 커피축제 공식 정보 갱신',
+          status: 'in_review',
+        },
+      }),
+    )
+    const client = createAdminApiClient({ fetchImpl })
+
+    await client.reviewProposal('proposal-1', '검토를 시작합니다.')
+
+    const body = JSON.parse(String(fetchImpl.mock.calls[0][1].body))
+    expect(fetchImpl.mock.calls[0][0]).toBe('/api/v1/admin/data-proposals/proposal-1/review')
+    expect(body).toEqual({ reviewNote: '검토를 시작합니다.' })
+    expect(body).not.toHaveProperty('reviewedBy')
+    expect(body).not.toHaveProperty('roles')
+    expect(body).not.toHaveProperty('organizationId')
+    expect(body).not.toHaveProperty('regionIds')
+  })
+
   it('lists proposal history records', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse({
@@ -167,7 +226,10 @@ describe('adminApi', () => {
   it('sends an explicit default page-size limit on list endpoints', async () => {
     // Fresh Response per call (not mockResolvedValue, which reuses one Response
     // and would fail the second read with "Body already read").
-    const fetchImpl = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({ items: [] }))
+    const fetchImpl = vi.fn((...args: [RequestInfo | URL, RequestInit?]) => {
+      void args
+      return jsonResponse({ items: [] })
+    })
     const client = createAdminApiClient({ baseUrl: 'https://api.lovv.example', fetchImpl })
 
     await client.listMonthlyDestinations()
@@ -177,6 +239,88 @@ describe('adminApi', () => {
 
     await client.listAuditLogs({ limit: 10 })
     expect(String(fetchImpl.mock.calls[1][0])).toContain('limit=10')
+  })
+
+  it('uses the BE high-risk request contract without MFA codes in decision bodies', async () => {
+    const fetchImpl = vi.fn((...args: [RequestInfo | URL, RequestInit?]) => {
+      void args
+      return jsonResponse({
+        request: {
+          id: 'high-risk-1',
+          operationType: 'role_grant',
+          targetUserId: 'target-1',
+          payload: { targetUserId: 'target-1', roleCode: 'R-LOCAL-OPERATOR' },
+          status: 'pending',
+          reason: '운영 권한 부여',
+          requestedBy: 'admin-1',
+          requestedAt: '2026-06-30T02:00:00Z',
+        },
+      })
+    })
+    const client = createAdminApiClient({ accessToken: 'access-token', fetchImpl })
+
+    await client.createHighRiskRequest({
+      operationType: 'role_grant',
+      targetUserId: 'target-1',
+      roleCode: 'R-LOCAL-OPERATOR',
+      reason: '운영 권한 부여',
+    })
+    await client.approveHighRiskRequest('high-risk-1', { decisionReason: '승인' })
+    await client.rejectHighRiskRequest('high-risk-1', { decisionReason: '근거 부족' })
+
+    const createCall = fetchImpl.mock.calls[0] as [RequestInfo | URL, RequestInit]
+    const approveCall = fetchImpl.mock.calls[1] as [RequestInfo | URL, RequestInit]
+    const rejectCall = fetchImpl.mock.calls[2] as [RequestInfo | URL, RequestInit]
+
+    expect(createCall[0]).toBe('/api/v1/admin/high-risk-requests')
+    expect(JSON.parse(String(createCall[1].body))).toEqual({
+      operationType: 'role_grant',
+      targetUserId: 'target-1',
+      roleCode: 'R-LOCAL-OPERATOR',
+      reason: '운영 권한 부여',
+    })
+    expect(approveCall[0]).toBe('/api/v1/admin/high-risk-requests/high-risk-1/approve')
+    expect(JSON.parse(String(approveCall[1].body))).toEqual({ decisionReason: '승인' })
+    expect(JSON.parse(String(approveCall[1].body))).not.toHaveProperty('totpCode')
+    expect(rejectCall[0]).toBe('/api/v1/admin/high-risk-requests/high-risk-1/reject')
+    expect(JSON.parse(String(rejectCall[1].body))).toEqual({ decisionReason: '근거 부족' })
+    expect((rejectCall[1].headers as Headers).get('Authorization')).toBe('Bearer access-token')
+  })
+
+  it('lists high-risk requests with BE-supported filters and adapts missing fields', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({
+        items: [
+          {
+            id: 'high-risk-1',
+            operationType: 'bulk_publish',
+            payload: { destinationIds: ['monthly-1', 'monthly-2'] },
+            status: 'pending',
+            reason: '월간 후보 일괄 게시',
+          },
+        ],
+        nextCursor: null,
+      }),
+    )
+    const client = createAdminApiClient({ baseUrl: 'https://api.lovv.example', fetchImpl })
+
+    const items = await client.listHighRiskRequests({ status: 'pending', operationType: 'bulk_publish', limit: 10 })
+
+    expect(fetchImpl.mock.calls[0][0]).toBe(
+      'https://api.lovv.example/api/v1/admin/high-risk-requests?status=pending&operationType=bulk_publish&limit=10',
+    )
+    expect(items[0]).toMatchObject({
+      id: 'high-risk-1',
+      operationType: 'bulk_publish',
+      status: 'pending',
+      reason: '월간 후보 일괄 게시',
+    })
+    expect(adaptHighRiskRequest(undefined)).toMatchObject({
+      id: '',
+      operationType: 'role_grant',
+      status: 'pending',
+      payload: {},
+    })
   })
 
 })
