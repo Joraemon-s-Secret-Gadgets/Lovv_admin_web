@@ -438,25 +438,50 @@ h3 {
   background: var(--lovv-color-surface-container);
 }
 
+.role-lane-owned {
+  border-color: color-mix(in srgb, var(--lovv-color-primary) 58%, var(--lovv-color-border-soft));
+  background: color-mix(in srgb, var(--lovv-color-primary) 9%, var(--lovv-color-surface-container));
+  box-shadow: inset 4px 0 0 var(--lovv-color-primary);
+}
+
+.role-lane-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
 .role-badge {
   display: inline-flex;
-  margin-bottom: 14px;
   padding: 6px 9px;
   border-radius: 999px;
-  color: #ffffff;
-  background: var(--lovv-color-mountain);
+  color: var(--lovv-color-text-soft);
+  background: var(--lovv-color-soft);
   font-size: 0.75rem;
   font-weight: 900;
 }
 
-.role-lane:nth-child(2) .role-badge {
-  color: #ffffff;
-  background: var(--lovv-color-sea);
-}
-
-.role-lane:nth-child(3) .role-badge {
+.role-lane-owned .role-badge {
   color: var(--lovv-color-text);
   background: var(--lovv-color-primary);
+}
+
+.role-owned-badge {
+  display: inline-flex;
+  padding: 6px 9px;
+  border-radius: 999px;
+  color: var(--lovv-color-text);
+  background: color-mix(in srgb, var(--lovv-color-primary) 24%, #ffffff);
+  font-size: 0.75rem;
+  font-weight: 900;
+}
+
+.role-lane-title {
+  display: block;
+  color: var(--lovv-color-text);
+  font-size: 1.05rem;
+  font-weight: 900;
 }
 
 .role-lane p {

@@ -277,7 +277,7 @@ function ProposalInsights({ proposals, isLoading }: { proposals: ReviewProposal[
   )
 }
 
-function RoleStatusPanel() {
+function RoleStatusPanel({ sessionRoles }: { sessionRoles: readonly AdminRole[] }) {
   return (
     <section className="panel" aria-labelledby="role-status-title">
       <details className="collapsible" open>
@@ -289,18 +289,31 @@ function RoleStatusPanel() {
           <span className="collapsible-chevron" aria-hidden="true" />
         </summary>
         <div className="role-lanes">
-          {roleLanes.map((lane) => (
-            <article className="role-lane" key={lane.role}>
-              <span className="role-badge">{lane.role}</span>
-              <h3>{lane.title}</h3>
-              <p>{lane.description}</p>
-              <ul>
-                {lane.responsibilities.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </article>
-          ))}
+          {roleLanes.map((lane) => {
+            const owned = sessionRoles.includes(lane.role)
+
+            return (
+              <article
+                aria-label={`${lane.role} 역할 ${owned ? '보유 중' : '미보유'}`}
+                className={owned ? 'role-lane role-lane-owned' : 'role-lane'}
+                data-owned={owned ? 'true' : 'false'}
+                data-testid={`role-lane-${lane.role}`}
+                key={lane.role}
+              >
+                <div className="role-lane-header">
+                  <span className="role-badge">{lane.role}</span>
+                  {owned && <span className="role-owned-badge">보유 중</span>}
+                </div>
+                <strong className="role-lane-title">{lane.title}</strong>
+                <p>{lane.description}</p>
+                <ul>
+                  {lane.responsibilities.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </article>
+            )
+          })}
         </div>
       </details>
     </section>
@@ -2369,9 +2382,9 @@ export function AdminDashboard() {
           <NoSessionRolePanel />
         ) : (
           <>
+            <RoleStatusPanel sessionRoles={sessionRoles} />
             {activeTab === 'metrics' && (
               <div className="stack">
-                <RoleStatusPanel />
                 <LocalOperatorMetrics
                   items={metricsItems}
                   isLoading={isMetricsLoading}

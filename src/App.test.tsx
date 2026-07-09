@@ -124,6 +124,12 @@ describe('Lovv admin console', () => {
     expect(screen.getByText('R-DATA-PROVIDER')).toBeInTheDocument()
     expect(screen.getByText('R-ADMIN')).toBeInTheDocument()
     expect(screen.getByText('R-SUPER-ADMIN')).toBeInTheDocument()
+    const adminRoleLane = screen.getByTestId('role-lane-R-ADMIN')
+    const superAdminRoleLane = screen.getByTestId('role-lane-R-SUPER-ADMIN')
+    expect(adminRoleLane).toHaveAttribute('data-owned', 'true')
+    expect(within(adminRoleLane).getByText('보유 중')).toBeInTheDocument()
+    expect(superAdminRoleLane).toHaveAttribute('data-owned', 'false')
+    expect(within(superAdminRoleLane).queryByText('보유 중')).not.toBeInTheDocument()
     expect(screen.getByText('제출 제안')).toBeInTheDocument()
     expect(screen.getByText('승인 완료')).toBeInTheDocument()
     expect(screen.getByText('반려/수정 요청')).toBeInTheDocument()
@@ -232,6 +238,26 @@ describe('Lovv admin console', () => {
     expect(await screen.findByRole('button', { name: '검토 시작' })).toBeEnabled()
   })
 
+  it('marks both admin and super-admin role cards for a combined session', () => {
+    useSessionRoles(['R-ADMIN', 'R-SUPER-ADMIN'])
+
+    render(<App />)
+
+    const adminRoleLane = screen.getByTestId('role-lane-R-ADMIN')
+    const superAdminRoleLane = screen.getByTestId('role-lane-R-SUPER-ADMIN')
+    const dataProviderRoleLane = screen.getByTestId('role-lane-R-DATA-PROVIDER')
+
+    expect(adminRoleLane).toHaveAttribute('data-owned', 'true')
+    expect(within(adminRoleLane).getByText('보유 중')).toBeInTheDocument()
+    expect(superAdminRoleLane).toHaveAttribute('data-owned', 'true')
+    expect(within(superAdminRoleLane).getByText('보유 중')).toBeInTheDocument()
+    expect(dataProviderRoleLane).toHaveAttribute('data-owned', 'false')
+    expect(within(dataProviderRoleLane).queryByText('보유 중')).not.toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: '운영 지표' })).toBeEnabled()
+    expect(screen.getByRole('tab', { name: '권한 승인' })).toBeEnabled()
+    expect(screen.getByRole('tab', { name: '데이터 제안' })).toBeDisabled()
+  })
+
   it('lists high-risk requests for regular admins but hides super-admin decisions', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = requestUrl(input)
@@ -327,6 +353,12 @@ describe('Lovv admin console', () => {
 
     expect(await screen.findByRole('heading', { name: '권한 승인 요청' })).toBeInTheDocument()
     expect(screen.getByTestId('current-role-badge')).toHaveTextContent('R-SUPER-ADMIN')
+    const superAdminRoleLane = screen.getByTestId('role-lane-R-SUPER-ADMIN')
+    const adminRoleLane = screen.getByTestId('role-lane-R-ADMIN')
+    expect(superAdminRoleLane).toHaveAttribute('data-owned', 'true')
+    expect(within(superAdminRoleLane).getByText('보유 중')).toBeInTheDocument()
+    expect(adminRoleLane).toHaveAttribute('data-owned', 'false')
+    expect(within(adminRoleLane).queryByText('보유 중')).not.toBeInTheDocument()
     const table = await screen.findByRole('table', { name: '고위험 변경 요청 목록' })
     expect(within(table).getByRole('button', { name: '승인 실행' })).toBeEnabled()
     fireEvent.click(within(table).getByRole('button', { name: '승인 실행' }))
