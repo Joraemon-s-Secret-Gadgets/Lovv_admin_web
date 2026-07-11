@@ -366,10 +366,13 @@ export type AuditLogResponse = {
   id?: string
   occurredAt?: string | null
   actorUserId?: string | null
+  actorDisplayName?: string | null
+  actorEmail?: string | null
   rolesSnapshot?: string[]
   action?: string
   resourceType?: string | null
   resourceId?: string | null
+  resourceDisplayName?: string | null
   result?: AuditLogResult
   reasonCode?: string | null
   afterSummary?: Record<string, unknown>
@@ -380,10 +383,17 @@ export type AuditLogEntry = {
   id: string
   occurredAt: string | null
   actorUserId: string | null
+  actorDisplayName: string | null
+  actorEmail: string | null
+  rolesSnapshot: string[]
   action: string
   resourceType: string | null
   resourceId: string | null
+  resourceDisplayName: string | null
   result: AuditLogResult
+  reasonCode: string | null
+  afterSummary: Record<string, unknown>
+  metadata: Record<string, unknown>
 }
 
 export type HighRiskOperationType =

@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { adaptAdminProposal, adaptDestinationMetricsSummary, adaptHighRiskRequest, createAdminApiClient } from './adminApi'
+import {
+  adaptAdminProposal,
+  adaptAuditLog,
+  adaptDestinationMetricsSummary,
+  adaptHighRiskRequest,
+  createAdminApiClient,
+} from './adminApi'
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return Promise.resolve(
@@ -223,6 +229,42 @@ describe('adminApi', () => {
       dateRange: '2026-10-01 ~ 2026-10-31',
     })
   })
+  it('preserves optional audit display fields and null fallbacks', () => {
+    expect(
+      adaptAuditLog({
+        id: 'audit-1',
+        actorUserId: 'admin-1',
+        actorDisplayName: '탈퇴/삭제 사용자',
+        actorEmail: null,
+        action: 'admin_mfa.verify',
+        resourceType: 'admin_mfa',
+        resourceId: 'admin-1',
+        resourceDisplayName: '관리자 추가 인증',
+        result: 'succeeded',
+      }),
+    ).toMatchObject({
+      actorUserId: 'admin-1',
+      actorDisplayName: '탈퇴/삭제 사용자',
+      actorEmail: null,
+      resourceDisplayName: '관리자 추가 인증',
+      result: 'succeeded',
+    })
+
+    expect(
+      adaptAuditLog({
+        actorUserId: 'admin-1',
+        actorDisplayName: null,
+        actorEmail: null,
+        resourceType: 'data_proposal',
+        resourceId: 'proposal-1',
+        resourceDisplayName: null,
+      }),
+    ).toMatchObject({
+      actorDisplayName: null,
+      actorEmail: null,
+      resourceDisplayName: null,
+    })
+  })
   it('sends an explicit default page-size limit on list endpoints', async () => {
     // Fresh Response per call (not mockResolvedValue, which reuses one Response
     // and would fail the second read with "Body already read").
@@ -239,6 +281,19 @@ describe('adminApi', () => {
 
     await client.listAuditLogs({ limit: 10 })
     expect(String(fetchImpl.mock.calls[1][0])).toContain('limit=10')
+
+    await client.listAuditLogs({
+      action: 'admin_mfa.verify',
+      resourceType: 'admin_mfa',
+      result: 'denied',
+      actorUserId: 'actor-42',
+      limit: 50,
+    })
+    expect(String(fetchImpl.mock.calls[2][0])).toContain('action=admin_mfa.verify')
+    expect(String(fetchImpl.mock.calls[2][0])).toContain('resourceType=admin_mfa')
+    expect(String(fetchImpl.mock.calls[2][0])).toContain('result=denied')
+    expect(String(fetchImpl.mock.calls[2][0])).toContain('actorUserId=actor-42')
+    expect(String(fetchImpl.mock.calls[2][0])).toContain('limit=50')
   })
 
   it('uses the BE high-risk request contract without MFA codes in decision bodies', async () => {

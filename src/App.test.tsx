@@ -96,6 +96,10 @@ function withVerifiedMfa(
   }
 }
 
+function expandRoleStatusPanel() {
+  fireEvent.click(screen.getByRole('button', { name: '역할 상세 보기' }))
+}
+
 describe('Lovv admin console', () => {
   beforeEach(() => {
     useSessionRole('R-ADMIN')
@@ -120,6 +124,13 @@ describe('Lovv admin console', () => {
     expect(screen.getByRole('tab', { name: '권한 승인' })).toBeInTheDocument()
     expect(screen.getByTestId('current-role-badge')).toHaveTextContent('R-ADMIN')
 
+    const roleToggle = screen.getByRole('button', { name: '역할 상세 보기' })
+    expect(roleToggle).toHaveAttribute('aria-expanded', 'false')
+    expect(roleToggle).toHaveAttribute('aria-controls', 'role-status-lanes')
+    expect(screen.queryByTestId('role-lane-R-ADMIN')).not.toBeInTheDocument()
+
+    expandRoleStatusPanel()
+    expect(screen.getByRole('button', { name: '역할 상세 접기' })).toHaveAttribute('aria-expanded', 'true')
     expect(await screen.findByText('R-LOCAL-OPERATOR')).toBeInTheDocument()
     expect(screen.getByText('R-DATA-PROVIDER')).toBeInTheDocument()
     expect(screen.getByText('R-ADMIN')).toBeInTheDocument()
@@ -133,6 +144,13 @@ describe('Lovv admin console', () => {
     expect(screen.getByText('제출 제안')).toBeInTheDocument()
     expect(screen.getByText('승인 완료')).toBeInTheDocument()
     expect(screen.getByText('반려/수정 요청')).toBeInTheDocument()
+  })
+
+  it('labels admin metrics as regional and all-destination operations', async () => {
+    render(<App />)
+
+    expect(screen.getByRole('heading', { name: '지역별/전체 운영 지표' })).toBeInTheDocument()
+    expect(await screen.findByRole('table', { name: '지역별/전체 운영 지표' })).toBeInTheDocument()
   })
 
   it('shows sample proposals and metrics without a backend token in dev preview mode', async () => {
@@ -156,7 +174,7 @@ describe('Lovv admin console', () => {
     const proposalTable = await screen.findByRole('table', { name: '데이터 제안 목록' })
     expect(await within(proposalTable).findByText('제주 동백 군락지 겨울 투어')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('tab', { name: '운영 지표' }))
-    const metricsTable = await screen.findByRole('table', { name: '담당 지역 운영 지표' })
+    const metricsTable = await screen.findByRole('table', { name: '지역별/전체 운영 지표' })
     expect(await within(metricsTable).findByText('제주')).toBeInTheDocument()
     expect(await within(metricsTable).findByText('12840')).toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([input]) => requestUrl(input).includes('/api/v1/admin/'))).toBe(false)
@@ -185,7 +203,7 @@ describe('Lovv admin console', () => {
 
     render(<App />)
 
-    expect(await screen.findByText('R-LOCAL-OPERATOR')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: '역할 상세 보기' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '관리자 추가 인증' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('tab', { name: '권한 승인' }))
     const table = await screen.findByRole('table', { name: '고위험 변경 요청 목록' })
@@ -243,6 +261,7 @@ describe('Lovv admin console', () => {
 
     render(<App />)
 
+    expandRoleStatusPanel()
     const adminRoleLane = screen.getByTestId('role-lane-R-ADMIN')
     const superAdminRoleLane = screen.getByTestId('role-lane-R-SUPER-ADMIN')
     const dataProviderRoleLane = screen.getByTestId('role-lane-R-DATA-PROVIDER')
@@ -256,6 +275,16 @@ describe('Lovv admin console', () => {
     expect(screen.getByRole('tab', { name: '운영 지표' })).toBeEnabled()
     expect(screen.getByRole('tab', { name: '권한 승인' })).toBeEnabled()
     expect(screen.getByRole('tab', { name: '데이터 제안' })).toBeDisabled()
+  })
+
+  it('keeps regional and all-destination metrics labels for admin plus super-admin sessions', async () => {
+    useSessionRoles(['R-ADMIN', 'R-SUPER-ADMIN'])
+
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('tab', { name: '운영 지표' }))
+    expect(screen.getByRole('heading', { name: '지역별/전체 운영 지표' })).toBeInTheDocument()
+    expect(await screen.findByRole('table', { name: '지역별/전체 운영 지표' })).toBeInTheDocument()
   })
 
   it('lists high-risk requests for regular admins but hides super-admin decisions', async () => {
@@ -353,6 +382,7 @@ describe('Lovv admin console', () => {
 
     expect(await screen.findByRole('heading', { name: '권한 승인 요청' })).toBeInTheDocument()
     expect(screen.getByTestId('current-role-badge')).toHaveTextContent('R-SUPER-ADMIN')
+    expandRoleStatusPanel()
     const superAdminRoleLane = screen.getByTestId('role-lane-R-SUPER-ADMIN')
     const adminRoleLane = screen.getByTestId('role-lane-R-ADMIN')
     expect(superAdminRoleLane).toHaveAttribute('data-owned', 'true')
@@ -432,6 +462,8 @@ describe('Lovv admin console', () => {
 
     render(<App />)
 
+    expect(screen.getByRole('heading', { name: '담당 지역 운영 지표' })).toBeInTheDocument()
+    expect(await screen.findByRole('table', { name: '담당 지역 운영 지표' })).toBeInTheDocument()
     const dashboard = await screen.findByRole('region', { name: '지역 운영자 집계 대시보드' })
     expect(within(dashboard).getByText('총 노출')).toBeInTheDocument()
     expect(within(dashboard).getByText('100')).toBeInTheDocument()
@@ -796,12 +828,19 @@ describe('Lovv admin console', () => {
   it('lists audit log entries in the audit tab', async () => {
     const entry = {
       id: 'audit-1',
-      occurredAt: '2026-06-24T00:00:00Z',
-      actorUserId: 'admin-1',
-      action: 'data_proposal.approve',
-      resourceType: 'data_proposal',
-      resourceId: 'proposal-1',
+      occurredAt: '2026-07-09T14:40:00Z',
+      actorUserId: '00f75a2d-3331-4976-b2e1-e150f20b0df8',
+      actorDisplayName: 'Admin One',
+      actorEmail: 'admin@example.com',
+      rolesSnapshot: ['R-ADMIN'],
+      action: 'high_risk_request.create',
+      resourceType: 'high_risk_request',
+      resourceId: 'risk-1',
+      resourceDisplayName: 'role_grant (Quarterly access adjustment)',
       result: 'succeeded',
+      reasonCode: 'APPROVED_BY_POLICY',
+      afterSummary: { status: 'pending', operationType: 'role_grant', targetUserId: 'target-1', unmappedKey: 'kept' },
+      metadata: { requestId: 'req-1', risk: 'low', payload: { nested: ['long-value'] } },
     }
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString()
@@ -817,9 +856,94 @@ describe('Lovv admin console', () => {
 
     expect(await screen.findByRole('heading', { name: '감사 로그' })).toBeInTheDocument()
     const table = await screen.findByRole('table', { name: '감사 로그 목록' })
-    expect(within(table).getByText('data_proposal.approve')).toBeInTheDocument()
+    expect(within(table).getByText('2026.07.09')).toBeInTheDocument()
+    expect(within(table).getByText('23:40')).toBeInTheDocument()
+    expect(within(table).getByText('2026-07-09 23:40:00 KST · 원본 UTC 2026-07-09T14:40:00Z')).toBeInTheDocument()
+    expect(screen.getByText('최근 1건')).toBeInTheDocument()
+    expect(within(table).getByText('고위험 요청 생성')).toBeInTheDocument()
+    expect(within(table).getByText('Admin One -> role_grant (Quarterly access adjustment)')).toBeInTheDocument()
+    expect(within(table).getAllByText('Admin One').length).toBeGreaterThan(0)
+    expect(within(table).getAllByText('admin@example.com').length).toBeGreaterThan(0)
+    expect(within(table).getAllByText('고위험 요청').length).toBeGreaterThan(0)
+    expect(within(table).getAllByText('role_grant (Quarterly access adjustment)').length).toBeGreaterThan(0)
+    expect(within(table).getByText('고위험 요청 · 원본 risk-1')).toBeInTheDocument()
+    expect(within(table).getByText('R-ADMIN')).toBeInTheDocument()
     expect(within(table).getByText('성공')).toBeInTheDocument()
+    expect(within(table).getAllByText('APPROVED_BY_POLICY').length).toBeGreaterThan(0)
+    expect(within(table).getByText('변경 후.상태')).toBeInTheDocument()
+    expect(within(table).getByText('pending')).toBeInTheDocument()
+    expect(within(table).getByText('변경 후.작업 유형')).toBeInTheDocument()
+    expect(within(table).getByText('role_grant')).toBeInTheDocument()
+    expect(within(table).getByText('변경 후.대상 사용자')).toBeInTheDocument()
+    expect(within(table).getByText('변경 후.unmappedKey')).toBeInTheDocument()
+    expect(within(table).getByText('메타데이터.요청 ID')).toBeInTheDocument()
+    expect(within(table).getByText('req-1')).toBeInTheDocument()
+    expect(within(table).getByText('메타데이터.위험도')).toBeInTheDocument()
+    expect(within(table).getByText('{"nested":["long-value"]}')).toBeInTheDocument()
+    expect(within(table).getByText('행위자 표시명')).toBeInTheDocument()
+    expect(within(table).getByText('행위자 이메일')).toBeInTheDocument()
+    expect(within(table).getByText('00f75a2d-3331-4976-b2e1-e150f20b0df8')).toBeInTheDocument()
+    expect(within(table).getByText('대상 표시명')).toBeInTheDocument()
+    expect(within(table).getByText('대상 원본 유형')).toBeInTheDocument()
+    expect(within(table).getByText('high_risk_request')).toBeInTheDocument()
+    expect(within(table).getByText('risk-1')).toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/admin/audit-logs'))).toBe(true)
+
+    fireEvent.change(screen.getByLabelText('결과'), { target: { value: 'denied' } })
+    fireEvent.change(screen.getByLabelText('대상 유형'), { target: { value: 'admin_mfa' } })
+    fireEvent.change(screen.getByLabelText('액션'), { target: { value: 'admin_mfa.verify' } })
+    fireEvent.change(screen.getByLabelText('행위자 ID'), { target: { value: '  actor-42  ' } })
+    fireEvent.change(screen.getByLabelText('표시 건수'), { target: { value: '20' } })
+    fireEvent.click(screen.getByRole('button', { name: '적용' }))
+
+    await waitFor(() => {
+      const auditCalls = fetchMock.mock.calls
+        .map(([input]) => String(input))
+        .filter((url) => url.includes('/api/v1/admin/audit-logs'))
+      const latestAuditCall = auditCalls[auditCalls.length - 1]
+      expect(latestAuditCall).toContain('result=denied')
+      expect(latestAuditCall).toContain('resourceType=admin_mfa')
+      expect(latestAuditCall).toContain('action=admin_mfa.verify')
+      expect(latestAuditCall).toContain('actorUserId=actor-42')
+      expect(latestAuditCall).toContain('limit=20')
+    })
+  })
+
+  it('falls back to original audit IDs when display fields are null', async () => {
+    const entry = {
+      id: 'audit-null',
+      occurredAt: '2026-07-10T00:00:00Z',
+      actorUserId: 'admin-1',
+      actorDisplayName: null,
+      actorEmail: null,
+      rolesSnapshot: ['R-ADMIN'],
+      action: 'data_proposal.approve',
+      resourceType: 'data_proposal',
+      resourceId: 'proposal-1',
+      resourceDisplayName: null,
+      result: 'succeeded',
+      reasonCode: null,
+      afterSummary: {},
+      metadata: {},
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.includes('/api/v1/admin/audit-logs')) {
+        return jsonResponse({ items: [entry] })
+      }
+      return jsonResponse({ items: [] })
+    })
+    vi.stubGlobal('fetch', vi.fn(withVerifiedMfa(fetchMock)))
+
+    render(<App />)
+    fireEvent.click(screen.getByRole('tab', { name: '감사 로그' }))
+
+    const table = await screen.findByRole('table', { name: '감사 로그 목록' })
+    expect(within(table).getByText('admin-1 -> proposal-1')).toBeInTheDocument()
+    expect(within(table).getAllByText('admin-1').length).toBeGreaterThan(0)
+    expect(within(table).getAllByText('proposal-1').length).toBeGreaterThan(0)
+    expect(within(table).getAllByText('데이터 제안').length).toBeGreaterThan(0)
+    expect(within(table).queryByText('null')).not.toBeInTheDocument()
   })
 
 })

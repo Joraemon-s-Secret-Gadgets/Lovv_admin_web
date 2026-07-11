@@ -496,6 +496,10 @@ h3 {
   line-height: 1.7;
 }
 
+.role-status-panel {
+  margin-top: 20px;
+}
+
 .metric-table {
   overflow-x: auto;
   border: 1px solid var(--lovv-color-border-soft);
@@ -765,6 +769,264 @@ h3 {
   background: #eceef2;
 }
 
+.audit-panel {
+  overflow: hidden;
+}
+
+.audit-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+  color: var(--lovv-color-text-soft);
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.audit-summary span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--lovv-color-border-soft);
+  border-radius: 999px;
+  background: #ffffff;
+}
+
+.audit-filter-form {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(130px, 1fr)) auto;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid var(--lovv-color-border-soft);
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.audit-filter-form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--lovv-color-text-soft);
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.audit-filter-form input,
+.audit-filter-form select {
+  width: 100%;
+  min-width: 0;
+}
+
+.audit-filter-form button {
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+.audit-table-wrap {
+  overflow-x: auto;
+}
+
+.audit-table {
+  width: 100%;
+  min-width: 920px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.audit-table th,
+.audit-table td {
+  padding: 14px 12px;
+  border-bottom: 1px solid var(--lovv-color-border-soft);
+  text-align: left;
+  vertical-align: top;
+}
+
+.audit-table thead th {
+  color: var(--lovv-color-text-soft);
+  background: var(--lovv-color-soft);
+  font-size: 0.82rem;
+  font-weight: 900;
+}
+
+.audit-table thead th:nth-child(1) {
+  width: 150px;
+}
+
+.audit-table thead th:nth-child(2) {
+  width: 34%;
+}
+
+.audit-table thead th:nth-child(3),
+.audit-table thead th:nth-child(4) {
+  width: 210px;
+}
+
+.audit-table thead th:nth-child(5) {
+  width: 110px;
+}
+
+.audit-date-row th {
+  padding: 12px;
+  color: var(--lovv-color-text);
+  background: #f8fafc;
+  font-size: 0.88rem;
+  font-weight: 900;
+}
+
+.audit-entry-row:hover {
+  background: #fbfcfe;
+}
+
+.audit-time-cell strong,
+.audit-event-cell strong {
+  display: block;
+  color: var(--lovv-color-text);
+  font-weight: 900;
+  line-height: 1.35;
+}
+
+.audit-time-cell span,
+.audit-event-cell span,
+.audit-reason {
+  display: block;
+  margin-top: 4px;
+  color: var(--lovv-color-text-soft);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.audit-id {
+  display: inline-block;
+  max-width: 100%;
+  color: var(--lovv-color-text);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
+}
+
+.audit-display-name {
+  display: block;
+  max-width: 100%;
+  color: var(--lovv-color-text);
+  font-weight: 900;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.audit-secondary-text {
+  display: block;
+  margin-top: 4px;
+  color: var(--lovv-color-text-soft);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.audit-resource-badge,
+.audit-role-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 900;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.audit-resource-badge {
+  margin: 0 8px 6px 0;
+  color: #243447;
+  background: #e8eef5;
+}
+
+.audit-role-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.audit-role-badge {
+  color: #1f2937;
+  background: #eef2ff;
+}
+
+.audit-details {
+  margin-top: 10px;
+}
+
+.audit-details summary {
+  width: max-content;
+  max-width: 100%;
+  color: var(--lovv-color-primary-dark);
+  font-size: 0.82rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.audit-details dl {
+  display: grid;
+  gap: 6px;
+  margin: 9px 0 0;
+  padding: 10px;
+  border: 1px solid var(--lovv-color-border-soft);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.audit-detail-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.35fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.audit-detail-row dt,
+.audit-detail-row dd {
+  margin: 0;
+  min-width: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.audit-detail-row dt {
+  color: var(--lovv-color-text-soft);
+  font-weight: 900;
+}
+
+.audit-detail-row dd {
+  color: var(--lovv-color-text);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.audit-table .status-succeeded {
+  color: #14532d;
+  background: #dcfce7;
+}
+
+.audit-table .status-allowed {
+  color: #1e3a8a;
+  background: #dbeafe;
+}
+
+.audit-table .status-denied {
+  color: #713f12;
+  background: #fef3c7;
+}
+
+.audit-table .status-failed {
+  color: #991b1b;
+  background: #fee2e2;
+}
+
 .api-status-row {
   display: flex;
   flex-wrap: wrap;
@@ -1015,6 +1277,14 @@ h3 {
   .review-layout {
     grid-template-columns: 1fr;
   }
+
+  .audit-filter-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .audit-filter-form button {
+    width: 100%;
+  }
 }
 
 @media (max-width: 640px) {
@@ -1051,6 +1321,15 @@ h3 {
 
   .timeline li {
     grid-template-columns: 1fr;
+  }
+
+  .audit-filter-form {
+    grid-template-columns: 1fr;
+  }
+
+  .audit-detail-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3px;
   }
 }
 
@@ -1420,24 +1699,17 @@ h3 {
   }
 }
 
-/* Collapsible panel (native <details>). */
-.collapsible > summary {
+/* Collapsible panel. */
+.collapsible-summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  cursor: pointer;
-  list-style: none;
 }
 
-.collapsible > summary::-webkit-details-marker {
-  display: none;
-}
-
-.collapsible > summary:focus-visible {
-  border-radius: 10px;
-  outline: 2px solid var(--lovv-color-text);
-  outline-offset: 4px;
+.collapsible-toggle {
+  flex: 0 0 auto;
+  border-radius: 999px;
 }
 
 .collapsible-heading {
@@ -1455,15 +1727,15 @@ h3 {
   transition: transform 0.2s ease, border-color 0.2s ease;
 }
 
-.collapsible[open] > summary .collapsible-chevron {
+.collapsible-toggle[aria-expanded='true'] .collapsible-chevron {
   transform: rotate(-135deg);
 }
 
-.collapsible > summary:hover .collapsible-chevron {
+.collapsible-toggle:hover .collapsible-chevron {
   border-color: var(--lovv-color-primary);
 }
 
-.collapsible[open] > .role-lanes {
+.role-status-panel .role-lanes {
   margin-top: 20px;
 }
 

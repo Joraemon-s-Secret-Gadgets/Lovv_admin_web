@@ -533,10 +533,17 @@ export function adaptAuditLog(entry: AuditLogResponse | undefined): AuditLogEntr
     id: entry?.id ?? '',
     occurredAt: entry?.occurredAt ?? null,
     actorUserId: entry?.actorUserId ?? null,
+    actorDisplayName: entry?.actorDisplayName ?? null,
+    actorEmail: entry?.actorEmail ?? null,
+    rolesSnapshot: entry?.rolesSnapshot ?? [],
     action: entry?.action ?? '',
     resourceType: entry?.resourceType ?? null,
     resourceId: entry?.resourceId ?? null,
+    resourceDisplayName: entry?.resourceDisplayName ?? null,
     result: entry?.result ?? 'succeeded',
+    reasonCode: entry?.reasonCode ?? null,
+    afterSummary: entry?.afterSummary ?? {},
+    metadata: entry?.metadata ?? {},
   }
 }
 

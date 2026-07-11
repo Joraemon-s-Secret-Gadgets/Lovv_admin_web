@@ -3,6 +3,7 @@
 // data flows through ./adminApi; the backend re-authorizes every call, so this
 // gating is UX, not a security boundary.
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { FormEvent } from 'react'
 import { AdminApiError, createAdminApiClient, createAdminAuthClient } from './adminApi'
 import {
   localMetrics,
@@ -23,6 +24,7 @@ import type {
   AdminRole,
   AdminTab,
   AuditLogEntry,
+  AuditLogResult,
   DestinationMetricsSummary,
   HighRiskChangeRequest,
   HighRiskChangeRequestInput,
@@ -86,6 +88,10 @@ function getStatusContrast(status: ProposalStatus) {
 
 function hasRole(roles: readonly AdminRole[], role: AdminRole) {
   return roles.includes(role)
+}
+
+function getMetricsDashboardLabel(roles: readonly AdminRole[]) {
+  return hasRole(roles, 'R-ADMIN') ? '지역별/전체 운영 지표' : '담당 지역 운영 지표'
 }
 
 function isTabAllowed(roles: readonly AdminRole[], tabId: AdminTab) {
@@ -278,17 +284,29 @@ function ProposalInsights({ proposals, isLoading }: { proposals: ReviewProposal[
 }
 
 function RoleStatusPanel({ sessionRoles }: { sessionRoles: readonly AdminRole[] }) {
+  const [isExpanded, setIsExpanded] = useState(false)
+  const roleLanesId = 'role-status-lanes'
+
   return (
-    <section className="panel" aria-labelledby="role-status-title">
-      <details className="collapsible" open>
-        <summary className="collapsible-summary">
-          <span className="collapsible-heading">
-            <span className="section-kicker">Role Gate</span>
-            <h2 id="role-status-title">역할 확인</h2>
-          </span>
+    <section className="panel role-status-panel" aria-labelledby="role-status-title">
+      <div className="collapsible-summary">
+        <span className="collapsible-heading">
+          <span className="section-kicker">Role Gate</span>
+          <h2 id="role-status-title">역할 확인</h2>
+        </span>
+        <button
+          aria-controls={roleLanesId}
+          aria-expanded={isExpanded}
+          className="collapsible-toggle"
+          onClick={() => setIsExpanded((expanded) => !expanded)}
+          type="button"
+        >
+          {isExpanded ? '역할 상세 접기' : '역할 상세 보기'}
           <span className="collapsible-chevron" aria-hidden="true" />
-        </summary>
-        <div className="role-lanes">
+        </button>
+      </div>
+      {isExpanded && (
+        <div className="role-lanes" id={roleLanesId}>
           {roleLanes.map((lane) => {
             const owned = sessionRoles.includes(lane.role)
 
@@ -315,7 +333,7 @@ function RoleStatusPanel({ sessionRoles }: { sessionRoles: readonly AdminRole[] 
             )
           })}
         </div>
-      </details>
+      )}
     </section>
   )
 }
@@ -375,11 +393,13 @@ function LocalOperatorMetrics({
   items,
   isLoading,
   errorMessage,
+  metricsLabel,
   onRefresh,
 }: {
   items: DestinationMetricsSummary[]
   isLoading: boolean
   errorMessage: string | null
+  metricsLabel: string
   onRefresh: () => void
 }) {
   const dashboard = buildLocalOperatorDashboard(items)
@@ -388,7 +408,7 @@ function LocalOperatorMetrics({
     <section className="panel" aria-labelledby="local-metrics-title">
       <div className="section-heading">
         <span className="section-kicker">Local Metrics</span>
-        <h2 id="local-metrics-title">담당 지역 데이터 운영 지표 조회</h2>
+        <h2 id="local-metrics-title">{metricsLabel}</h2>
       </div>
       <div className="api-status-row">
         {isLoading && <span role="status">지표를 불러오는 중입니다.</span>}
@@ -455,7 +475,7 @@ function LocalOperatorMetrics({
               total={dashboard.totalImpressions}
             />
           </div>
-          <div className="metric-table" role="table" aria-label="담당 지역 운영 지표">
+          <div className="metric-table" role="table" aria-label={metricsLabel}>
             <div role="row" className="metric-row metric-row-head metric-row-wide">
               <span role="columnheader">지역/도시</span>
               <span role="columnheader">노출</span>
@@ -487,7 +507,7 @@ function LocalOperatorMetrics({
           </div>
         </>
       ) : (
-        <div className="metric-table" role="table" aria-label="담당 지역 운영 지표 예시">
+        <div className="metric-table" role="table" aria-label={metricsLabel}>
           <div role="row" className="metric-row metric-row-head">
             <span role="columnheader">지표</span>
             <span role="columnheader">현재 값</span>
@@ -531,28 +551,419 @@ const auditResultLabels: Record<AuditLogEntry['result'], string> = {
   failed: '실패',
 }
 
+type AuditLogFilters = {
+  action: string
+  resourceType: string
+  result: '' | AuditLogResult
+  actorUserId: string
+  limit: 20 | 50
+}
+
+type AuditLogRequestFilters = {
+  action?: string
+  resourceType?: string
+  result?: AuditLogResult
+  actorUserId?: string
+  limit: number
+}
+
+const defaultAuditLogFilters: AuditLogFilters = {
+  action: '',
+  resourceType: '',
+  result: '',
+  actorUserId: '',
+  limit: 50,
+}
+
+const auditResultFilterOptions: { value: AuditLogFilters['result']; label: string }[] = [
+  { value: '', label: '전체' },
+  { value: 'succeeded', label: '성공' },
+  { value: 'allowed', label: '허용' },
+  { value: 'denied', label: '거부' },
+  { value: 'failed', label: '실패' },
+]
+
+const auditActionLabels: Record<string, string> = {
+  'admin_mfa.enroll': '추가 인증 등록',
+  'admin_mfa.confirm': '추가 인증 등록 확인',
+  'admin_mfa.verify': '추가 인증 검증',
+  'admin_mfa.recover': '추가 인증 복구',
+  'admin_mfa.recovery_enroll': '복구 코드 등록',
+  'high_risk_request.create': '고위험 요청 생성',
+  'high_risk_request.approve': '고위험 요청 승인',
+  'high_risk_request.reject': '고위험 요청 거절',
+  'role_grant.execute': '역할 부여 실행',
+  'role_revoke.execute': '역할 회수 실행',
+  'region_grant.execute': '지역 권한 부여 실행',
+  'region_revoke.execute': '지역 권한 회수 실행',
+  'data_proposal.approve': '데이터 제안 승인',
+  'data_proposal.reject': '데이터 제안 거절',
+  'data_proposal.request_changes': '데이터 제안 수정 요청',
+  'monthly_destination.publish': '월간 후보 게시',
+  'notice.publish': '공지 게시',
+  'recommendation_policy.update': '추천 정책 수정',
+}
+
+const auditResourceLabels: Record<string, string> = {
+  admin_mfa: '관리자 추가 인증',
+  high_risk_request: '고위험 요청',
+  data_proposal: '데이터 제안',
+  monthly_destination: '월간 여행지 후보',
+  notice: '공지',
+  recommendation_policy: '추천 정책',
+  role_grant: '역할 부여',
+  role_revoke: '역할 회수',
+  region_grant: '지역 권한 부여',
+  region_revoke: '지역 권한 회수',
+}
+
+const auditActionFilterOptions = Object.entries(auditActionLabels).map(([value, label]) => ({ value, label }))
+const auditResourceFilterOptions = Object.entries(auditResourceLabels).map(([value, label]) => ({ value, label }))
+const auditLimitOptions: AuditLogFilters['limit'][] = [20, 50]
+
+const auditDetailKeyLabels: Record<string, string> = {
+  status: '상태',
+  targetUserId: '대상 사용자',
+  roleCode: '역할',
+  requestId: '요청 ID',
+  risk: '위험도',
+  operationType: '작업 유형',
+  targetRegionId: '대상 지역',
+  targetDestinationId: '대상 여행지',
+  reason: '사유',
+  requestedBy: '요청자',
+  approvedBy: '승인자',
+  rejectedBy: '거절자',
+}
+
+function getAuditDetailKeyLabel(key: string) {
+  return auditDetailKeyLabels[key] ?? key
+}
+
+function toAuditRequestFilters(filters: AuditLogFilters): AuditLogRequestFilters {
+  const actorUserId = filters.actorUserId.trim()
+
+  return {
+    ...(filters.action ? { action: filters.action } : {}),
+    ...(filters.resourceType ? { resourceType: filters.resourceType } : {}),
+    ...(filters.result ? { result: filters.result } : {}),
+    ...(actorUserId ? { actorUserId } : {}),
+    limit: filters.limit,
+  }
+}
+
+function formatAuditToken(value: string | null | undefined) {
+  return value ? value.replace(/[_.-]+/g, ' ') : '-'
+}
+
+function getAuditActionLabel(action: string) {
+  return auditActionLabels[action] ?? formatAuditToken(action)
+}
+
+function getAuditResourceLabel(resourceType: string | null) {
+  if (!resourceType) {
+    return '대상 없음'
+  }
+
+  return auditResourceLabels[resourceType] ?? formatAuditToken(resourceType)
+}
+
+function getAuditActorDisplay(entry: AuditLogEntry) {
+  return entry.actorDisplayName || entry.actorEmail || entry.actorUserId || '-'
+}
+
+function getAuditActorSubtext(entry: AuditLogEntry) {
+  if (entry.actorDisplayName && entry.actorEmail) {
+    return entry.actorEmail
+  }
+
+  if ((entry.actorDisplayName || entry.actorEmail) && entry.actorUserId) {
+    return `원본 ${abbreviateAuditId(entry.actorUserId)}`
+  }
+
+  return null
+}
+
+function getAuditResourceDisplay(entry: AuditLogEntry) {
+  return entry.resourceDisplayName || entry.resourceId || getAuditResourceLabel(entry.resourceType)
+}
+
+function getAuditResourceSubtext(entry: AuditLogEntry) {
+  const typeLabel = getAuditResourceLabel(entry.resourceType)
+
+  if (entry.resourceDisplayName && entry.resourceId) {
+    return `${typeLabel} · 원본 ${abbreviateAuditId(entry.resourceId)}`
+  }
+
+  if (entry.resourceDisplayName || entry.resourceId) {
+    return typeLabel
+  }
+
+  return null
+}
+
+function abbreviateAuditId(value: string | null | undefined) {
+  if (!value) {
+    return '-'
+  }
+
+  return value.length > 16 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value
+}
+
+function getDatePart(parts: Intl.DateTimeFormatPart[], type: Intl.DateTimeFormatPartTypes) {
+  return parts.find((part) => part.type === type)?.value ?? ''
+}
+
+function formatAuditTimestamp(value: string | null) {
+  if (!value) {
+    return {
+      groupLabel: '날짜 없음',
+      timeLabel: '-',
+      detailLabel: '시각 정보 없음',
+    }
+  }
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return {
+      groupLabel: '날짜 미상',
+      timeLabel: value,
+      detailLabel: value,
+    }
+  }
+
+  const kstParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date)
+  const year = getDatePart(kstParts, 'year')
+  const month = getDatePart(kstParts, 'month')
+  const day = getDatePart(kstParts, 'day')
+  const hour = getDatePart(kstParts, 'hour')
+  const minute = getDatePart(kstParts, 'minute')
+  const second = getDatePart(kstParts, 'second')
+
+  return {
+    groupLabel: `${year}.${month}.${day}`,
+    timeLabel: `${hour}:${minute}`,
+    detailLabel: `${year}-${month}-${day} ${hour}:${minute}:${second} KST · 원본 UTC ${value}`,
+  }
+}
+
+function formatAuditValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return '-'
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => formatAuditValue(item)).join(', ')
+  }
+
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return String(value)
+    }
+  }
+
+  return String(value)
+}
+
+function renderAuditDetailRows(entry: AuditLogEntry) {
+  const rows: { label: string; value: string }[] = []
+
+  if (entry.reasonCode) {
+    rows.push({ label: '사유 코드', value: entry.reasonCode })
+  }
+
+  Object.entries(entry.afterSummary).forEach(([key, value]) => {
+    rows.push({ label: `변경 후.${getAuditDetailKeyLabel(key)}`, value: formatAuditValue(value) })
+  })
+
+  Object.entries(entry.metadata).forEach(([key, value]) => {
+    rows.push({ label: `메타데이터.${getAuditDetailKeyLabel(key)}`, value: formatAuditValue(value) })
+  })
+
+  if (entry.actorDisplayName) {
+    rows.push({ label: '행위자 표시명', value: entry.actorDisplayName })
+  }
+
+  if (entry.actorEmail) {
+    rows.push({ label: '행위자 이메일', value: entry.actorEmail })
+  }
+
+  if (entry.actorUserId) {
+    rows.push({ label: '행위자 원본 ID', value: entry.actorUserId })
+  }
+
+  if (entry.resourceDisplayName) {
+    rows.push({ label: '대상 표시명', value: entry.resourceDisplayName })
+  }
+
+  if (entry.resourceType) {
+    rows.push({ label: '대상 원본 유형', value: entry.resourceType })
+  }
+
+  if (entry.resourceId) {
+    rows.push({ label: '대상 원본 ID', value: entry.resourceId })
+  }
+
+  if (entry.action) {
+    rows.push({ label: '원본 액션', value: entry.action })
+  }
+
+  return rows
+}
+
 // 감사 로그 tab: read-only audit trail (most recent admin mutations) and the
 // console's primary monitoring surface.
 function AuditLogPanel({
   entries,
   isLoading,
   errorMessage,
+  filters,
+  onApplyFilters,
   onRefresh,
 }: {
   entries: AuditLogEntry[]
   isLoading: boolean
   errorMessage: string | null
+  filters: AuditLogFilters
+  onApplyFilters: (filters: AuditLogFilters) => void
   onRefresh: () => void
 }) {
+  const [draftFilters, setDraftFilters] = useState(filters)
+
+  useEffect(() => {
+    setDraftFilters(filters)
+  }, [filters])
+
+  const auditGroups = useMemo(() => {
+    const groups: { dateLabel: string; entries: AuditLogEntry[] }[] = []
+
+    entries.forEach((entry) => {
+      const dateLabel = formatAuditTimestamp(entry.occurredAt).groupLabel
+      const existing = groups.find((group) => group.dateLabel === dateLabel)
+      if (existing) {
+        existing.entries.push(entry)
+      } else {
+        groups.push({ dateLabel, entries: [entry] })
+      }
+    })
+
+    return groups
+  }, [entries])
+
+  const resultCounts = useMemo(
+    () =>
+      entries.reduce(
+        (counts, entry) => ({
+          ...counts,
+          [entry.result]: counts[entry.result] + 1,
+        }),
+        { allowed: 0, denied: 0, succeeded: 0, failed: 0 },
+      ),
+    [entries],
+  )
+  const latestTimestamp = entries[0]?.occurredAt ? formatAuditTimestamp(entries[0].occurredAt).detailLabel : '-'
+  const handleFilterSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    onApplyFilters({ ...draftFilters, actorUserId: draftFilters.actorUserId.trim() })
+  }
+
   return (
-    <section className="panel" aria-labelledby="audit-title">
+    <section className="panel audit-panel" aria-labelledby="audit-title">
       <div className="section-heading">
-        <span className="section-kicker">Audit Trail</span>
-        <h2 id="audit-title">감사 로그</h2>
+        <div>
+          <span className="section-kicker">Audit Trail</span>
+          <h2 id="audit-title">감사 로그</h2>
+        </div>
         <button type="button" className="ghost-button" onClick={onRefresh} disabled={isLoading}>
           새로고침
         </button>
       </div>
+      <form className="audit-filter-form" aria-label="감사 로그 필터" onSubmit={handleFilterSubmit}>
+        <label>
+          <span>결과</span>
+          <select
+            value={draftFilters.result}
+            onChange={(event) =>
+              setDraftFilters((current) => ({ ...current, result: event.target.value as AuditLogFilters['result'] }))
+            }
+          >
+            {auditResultFilterOptions.map((option) => (
+              <option key={option.value || 'all'} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>대상 유형</span>
+          <select
+            value={draftFilters.resourceType}
+            onChange={(event) => setDraftFilters((current) => ({ ...current, resourceType: event.target.value }))}
+          >
+            <option value="">전체</option>
+            {auditResourceFilterOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>액션</span>
+          <select
+            value={draftFilters.action}
+            onChange={(event) => setDraftFilters((current) => ({ ...current, action: event.target.value }))}
+          >
+            <option value="">전체</option>
+            {auditActionFilterOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>행위자 ID</span>
+          <input
+            value={draftFilters.actorUserId}
+            onChange={(event) => setDraftFilters((current) => ({ ...current, actorUserId: event.target.value }))}
+            placeholder="actorUserId"
+            type="text"
+          />
+        </label>
+        <label>
+          <span>표시 건수</span>
+          <select
+            value={draftFilters.limit}
+            onChange={(event) =>
+              setDraftFilters((current) => ({
+                ...current,
+                limit: Number(event.target.value) as AuditLogFilters['limit'],
+              }))
+            }
+          >
+            {auditLimitOptions.map((limit) => (
+              <option key={limit} value={limit}>
+                {limit}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button type="submit" className="primary-button" disabled={isLoading}>
+          적용
+        </button>
+      </form>
       {errorMessage ? (
         <p role="alert" className="error-text">
           {errorMessage}
@@ -563,33 +974,101 @@ function AuditLogPanel({
       ) : entries.length === 0 ? (
         <p>기록된 감사 로그가 없습니다.</p>
       ) : (
-        <table aria-label="감사 로그 목록">
-          <thead>
-            <tr>
-              <th scope="col">시각</th>
-              <th scope="col">행위자</th>
-              <th scope="col">액션</th>
-              <th scope="col">대상</th>
-              <th scope="col">결과</th>
-            </tr>
-          </thead>
-          <tbody>
-            {entries.map((entry) => (
-              <tr key={entry.id}>
-                <td>{entry.occurredAt ?? '-'}</td>
-                <td>{entry.actorUserId ?? '-'}</td>
-                <td>{entry.action}</td>
-                <td>
-                  {entry.resourceType ?? '-'}
-                  {entry.resourceId ? ` · ${entry.resourceId}` : ''}
-                </td>
-                <td>
-                  <span className={`status-pill status-${entry.result}`}>{auditResultLabels[entry.result]}</span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <>
+          <div className="audit-summary" aria-label="현재 로드된 감사 로그 요약">
+            <span>최근 {entries.length}건</span>
+            <span>성공 {resultCounts.succeeded}</span>
+            <span>허용 {resultCounts.allowed}</span>
+            <span>거부 {resultCounts.denied}</span>
+            <span>실패 {resultCounts.failed}</span>
+            <span>마지막 로그 {latestTimestamp}</span>
+          </div>
+          <div className="audit-table-wrap">
+            <table aria-label="감사 로그 목록" className="audit-table">
+              <thead>
+                <tr>
+                  <th scope="col">시각</th>
+                  <th scope="col">이벤트</th>
+                  <th scope="col">행위자</th>
+                  <th scope="col">대상</th>
+                  <th scope="col">결과</th>
+                </tr>
+              </thead>
+              {auditGroups.map((group) => (
+                <tbody key={group.dateLabel}>
+                  <tr className="audit-date-row">
+                    <th scope="rowgroup" colSpan={5}>
+                      {group.dateLabel}
+                    </th>
+                  </tr>
+                  {group.entries.map((entry) => {
+                    const timestamp = formatAuditTimestamp(entry.occurredAt)
+                    const resourceLabel = getAuditResourceLabel(entry.resourceType)
+                    const actorDisplay = getAuditActorDisplay(entry)
+                    const actorSubtext = getAuditActorSubtext(entry)
+                    const resourceDisplay = getAuditResourceDisplay(entry)
+                    const resourceSubtext = getAuditResourceSubtext(entry)
+                    const detailRows = renderAuditDetailRows(entry)
+
+                    return (
+                      <tr key={entry.id} className="audit-entry-row">
+                        <td className="audit-time-cell">
+                          <strong>{timestamp.timeLabel}</strong>
+                          <span>{timestamp.detailLabel}</span>
+                        </td>
+                        <td className="audit-event-cell">
+                          <strong>{getAuditActionLabel(entry.action)}</strong>
+                          <span>
+                            {actorDisplay}
+                            {' -> '}
+                            {resourceDisplay}
+                          </span>
+                          <details className="audit-details">
+                            <summary>상세 정보</summary>
+                            <dl>
+                              {detailRows.map((row) => (
+                                <div key={`${entry.id}-${row.label}`} className="audit-detail-row">
+                                  <dt>{row.label}</dt>
+                                  <dd>{row.value}</dd>
+                                </div>
+                              ))}
+                            </dl>
+                          </details>
+                        </td>
+                        <td>
+                          <span className="audit-display-name" title={entry.actorDisplayName ?? entry.actorEmail ?? entry.actorUserId ?? undefined}>
+                            {actorDisplay}
+                          </span>
+                          {actorSubtext ? <span className="audit-secondary-text">{actorSubtext}</span> : null}
+                          {entry.rolesSnapshot.length > 0 ? (
+                            <div className="audit-role-list" aria-label="행위자 역할 스냅샷">
+                              {entry.rolesSnapshot.map((role) => (
+                                <span key={role} className="audit-role-badge">
+                                  {role}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </td>
+                        <td>
+                          <span className="audit-resource-badge">{resourceLabel}</span>
+                          <span className="audit-display-name" title={entry.resourceDisplayName ?? entry.resourceId ?? undefined}>
+                            {resourceDisplay}
+                          </span>
+                          {resourceSubtext ? <span className="audit-secondary-text">{resourceSubtext}</span> : null}
+                        </td>
+                        <td>
+                          <span className={`status-pill status-${entry.result}`}>{auditResultLabels[entry.result]}</span>
+                          {entry.reasonCode ? <span className="audit-reason">{entry.reasonCode}</span> : null}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              ))}
+            </table>
+          </div>
+        </>
       )}
     </section>
   )
@@ -1613,6 +2092,7 @@ export function AdminDashboard() {
       ? `${currentRole} 외 ${sessionRoles.length - 1}개 역할`
       : currentRole
     : '역할 없음'
+  const metricsLabel = useMemo(() => getMetricsDashboardLabel(sessionRoles), [sessionRoles])
   const [apiProposals, setApiProposals] = useState<ReviewProposal[]>([])
   const [isProposalLoading, setIsProposalLoading] = useState(true)
   const [proposalError, setProposalError] = useState<string | null>(null)
@@ -1633,6 +2113,7 @@ export function AdminDashboard() {
   const [isOperationsLoading, setIsOperationsLoading] = useState(false)
   const [operationsError, setOperationsError] = useState<string | null>(null)
   const [auditEntries, setAuditEntries] = useState<AuditLogEntry[]>([])
+  const [auditQuery, setAuditQuery] = useState({ filters: defaultAuditLogFilters, requestId: 0 })
   const [isAuditLoading, setIsAuditLoading] = useState(false)
   const [auditError, setAuditError] = useState<string | null>(null)
   const [highRiskRequests, setHighRiskRequests] = useState<HighRiskChangeRequest[]>([])
@@ -1683,11 +2164,11 @@ export function AdminDashboard() {
     }
   }, [adminApi])
 
-  const loadAudit = useCallback(async () => {
+  const loadAudit = useCallback(async (filters: AuditLogFilters) => {
     setIsAuditLoading(true)
     setAuditError(null)
     try {
-      const items = await adminApi.listAuditLogs({ limit: 50 })
+      const items = await adminApi.listAuditLogs(toAuditRequestFilters(filters))
       setAuditEntries(items)
     } catch (error) {
       setAuditError(error instanceof Error ? error.message : '감사 로그를 불러오지 못했습니다.')
@@ -1696,6 +2177,14 @@ export function AdminDashboard() {
       setIsAuditLoading(false)
     }
   }, [adminApi])
+
+  const requestAuditRefresh = useCallback(() => {
+    setAuditQuery((current) => ({ ...current, requestId: current.requestId + 1 }))
+  }, [])
+
+  const applyAuditFilters = useCallback((filters: AuditLogFilters) => {
+    setAuditQuery((current) => ({ filters, requestId: current.requestId + 1 }))
+  }, [])
 
   const loadHighRiskRequests = useCallback(async () => {
     setIsHighRiskLoading(true)
@@ -1861,10 +2350,10 @@ export function AdminDashboard() {
       return
     }
     const task = window.setTimeout(() => {
-      void loadAudit()
+      void loadAudit(auditQuery.filters)
     }, 0)
     return () => window.clearTimeout(task)
-  }, [accessToken, activeTab, sessionRoles, loadAudit])
+  }, [accessToken, activeTab, sessionRoles, loadAudit, auditQuery])
 
   // Load pending high-risk requests eagerly (not only when the tab is open) so the
   // "권한 승인" tab can surface a pending-count badge for admins/super-admins.
@@ -2323,6 +2812,8 @@ export function AdminDashboard() {
         </div>
       </header>
 
+      {sessionRoles.length > 0 && <RoleStatusPanel sessionRoles={sessionRoles} />}
+
       <SummaryCards proposals={apiProposals} isLoading={isProposalLoading} />
 
       <ProposalInsights proposals={apiProposals} isLoading={isProposalLoading} />
@@ -2382,13 +2873,13 @@ export function AdminDashboard() {
           <NoSessionRolePanel />
         ) : (
           <>
-            <RoleStatusPanel sessionRoles={sessionRoles} />
             {activeTab === 'metrics' && (
               <div className="stack">
                 <LocalOperatorMetrics
                   items={metricsItems}
                   isLoading={isMetricsLoading}
                   errorMessage={metricsError}
+                  metricsLabel={metricsLabel}
                   onRefresh={() => void loadMetrics()}
                 />
               </div>
@@ -2470,7 +2961,9 @@ export function AdminDashboard() {
                 entries={auditEntries}
                 isLoading={isAuditLoading}
                 errorMessage={auditError}
-                onRefresh={() => void loadAudit()}
+                filters={auditQuery.filters}
+                onApplyFilters={applyAuditFilters}
+                onRefresh={requestAuditRefresh}
               />
             )}
           </>
