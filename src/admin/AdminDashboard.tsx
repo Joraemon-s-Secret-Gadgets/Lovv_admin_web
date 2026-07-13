@@ -841,10 +841,6 @@ function AuditLogPanel({
 }) {
   const [draftFilters, setDraftFilters] = useState(filters)
 
-  useEffect(() => {
-    setDraftFilters(filters)
-  }, [filters])
-
   const auditGroups = useMemo(() => {
     const groups: { dateLabel: string; entries: AuditLogEntry[] }[] = []
 
@@ -875,7 +871,9 @@ function AuditLogPanel({
   const latestTimestamp = entries[0]?.occurredAt ? formatAuditTimestamp(entries[0].occurredAt).detailLabel : '-'
   const handleFilterSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    onApplyFilters({ ...draftFilters, actorUserId: draftFilters.actorUserId.trim() })
+    const normalizedFilters = { ...draftFilters, actorUserId: draftFilters.actorUserId.trim() }
+    setDraftFilters(normalizedFilters)
+    onApplyFilters(normalizedFilters)
   }
 
   return (
