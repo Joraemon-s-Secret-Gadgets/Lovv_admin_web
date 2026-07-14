@@ -776,7 +776,7 @@ describe('Lovv admin console', () => {
       }
       const authorization = new Headers(init?.headers).get('Authorization')
       if (url.includes('/api/v1/admin/') && authorization !== `Bearer ${freshToken}`) {
-        return jsonResponse({ message: 'Unauthorized' }, { status: 403 })
+        return jsonResponse({ message: 'Forbidden' }, { status: 403 })
       }
       if (url.includes('/api/v1/admin/security/mfa/status')) {
         return jsonResponse({ mfa: verifiedMfaStatus })

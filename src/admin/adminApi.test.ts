@@ -128,7 +128,8 @@ describe('adminApi', () => {
   it.each([
     [401, { error: { code: 'UNAUTHORIZED', message: 'Authentication is required' } }],
     [403, { message: 'Unauthorized' }],
-  ])('refreshes once after a Gateway authentication failure (%s)', async (status, body) => {
+    [403, { message: 'Forbidden' }],
+  ])('refreshes once after a Gateway authentication failure (%s, %j)', async (status, body) => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(await jsonResponse(body, { status }))
       .mockResolvedValueOnce(await jsonResponse({ items: [] }))
@@ -222,6 +223,23 @@ describe('adminApi', () => {
       refreshAccessToken,
     })
     await expect(networkClient.listProposals()).rejects.toThrow('Failed to fetch')
+    expect(refreshAccessToken).not.toHaveBeenCalled()
+  })
+
+  it('does not treat a non-exact Forbidden payload as a Gateway authentication failure', async () => {
+    const refreshAccessToken = vi.fn().mockResolvedValue('fresh-token')
+    const client = createAdminApiClient({
+      fetchImpl: vi.fn().mockResolvedValue(await jsonResponse({
+        message: 'Forbidden',
+        reason: 'role policy',
+      }, { status: 403 })),
+      refreshAccessToken,
+    })
+
+    await expect(client.listProposals()).rejects.toMatchObject({
+      status: 403,
+      code: 'ADMIN_API_ERROR',
+    })
     expect(refreshAccessToken).not.toHaveBeenCalled()
   })
 

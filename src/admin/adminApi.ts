@@ -607,7 +607,8 @@ function isGatewayAuthenticationFailure(response: Response, payload: unknown): b
     return false
   }
   const record = payload as Record<string, unknown>
-  return Object.keys(record).length === 1 && record.message === 'Unauthorized'
+  return Object.keys(record).length === 1 &&
+    (record.message === 'Unauthorized' || record.message === 'Forbidden')
 }
 
 function toAdminApiError(response: Response, payload: unknown): AdminApiError {
