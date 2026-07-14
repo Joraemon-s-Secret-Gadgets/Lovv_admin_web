@@ -138,8 +138,8 @@ describe('high-risk decision flows (super admin)', () => {
       const url = requestUrl(input)
       if (url.endsWith('/api/v1/admin/security/mfa/verify')) {
         return jsonResponse(
-          { error: { code: 'MFA_REAUTH_REQUIRED', message: 'MFA 재인증이 만료되었습니다.' } },
-          { status: 401 },
+          { error: { code: 'ADMIN_MFA_CODE_INVALID', message: 'MFA 재인증이 만료되었습니다.' } },
+          { status: 403 },
         )
       }
       if (url.endsWith('/api/v1/admin/high-risk-requests/high-risk-1/approve') && init?.method === 'POST') {

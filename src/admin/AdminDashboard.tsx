@@ -14,6 +14,7 @@ import {
   summaryMetrics,
 } from './adminData'
 import {
+  clearAccessToken,
   decodeTokenRoles,
   getDevAccessToken,
   getSessionRoles,
@@ -2095,6 +2096,7 @@ export function AdminDashboard({
     () => getSessionRoles(accessToken).length > 0 || useSamplePreview,
   )
   const isRedirecting = useRef(false)
+  const refreshSessionPromise = useRef<Promise<string> | null>(null)
   // Session roles come from the token, not a manual switcher. currentRole is the
   // display/default-tab role; tab/action access uses the full role union.
   const sessionRoles = useMemo(() => {
@@ -2118,11 +2120,59 @@ export function AdminDashboard({
   const [proposalHistory, setProposalHistory] = useState<ProposalHistoryItem[]>([])
   const [isHistoryLoading, setIsHistoryLoading] = useState(false)
   const activePanelId = useMemo(() => `admin-panel-${activeTab}`, [activeTab])
-  const adminApi = useMemo(
-    () => createAdminApiClient(accessToken ? { accessToken } : {}),
-    [accessToken],
-  )
   const authClient = useMemo(() => createAdminAuthClient(), [])
+  const expireAdminSession = useCallback(() => {
+    clearAccessToken()
+    setAccessToken('')
+    setIsSessionAuthorized(false)
+    if (!isRedirecting.current) {
+      isRedirecting.current = true
+      redirectToPublicHome(PUBLIC_HOME_URL)
+    }
+  }, [redirectToPublicHome])
+  const refreshAdminSession = useCallback((): Promise<string> => {
+    // A slower request may report the old token after another request already
+    // completed the refresh. Reuse that in-memory token instead of starting a
+    // second session exchange from the stale client instance.
+    const currentToken = getStoredAccessToken()
+    if (currentToken && currentToken !== accessToken && decodeTokenRoles(currentToken).length > 0) {
+      return Promise.resolve(currentToken)
+    }
+    if (refreshSessionPromise.current) {
+      return refreshSessionPromise.current
+    }
+    const refresh = authClient
+      .restoreSession()
+      .then((session) => {
+        const token = session.accessToken?.trim() ?? ''
+        if (!token || decodeTokenRoles(token).length === 0) {
+          throw new AdminApiError(401, 'ADMIN_SESSION_INVALID', 'Admin session could not be restored.')
+        }
+        storeAccessToken(token)
+        setAccessToken(token)
+        setIsSessionAuthorized(true)
+        return token
+      })
+      .catch((error) => {
+        expireAdminSession()
+        throw error
+      })
+      .finally(() => {
+        refreshSessionPromise.current = null
+      })
+    refreshSessionPromise.current = refresh
+    return refresh
+  }, [accessToken, authClient, expireAdminSession])
+  const adminApi = useMemo(
+    // The client stores these callbacks; it never invokes them during render.
+    // eslint-disable-next-line react-hooks/refs
+    () => createAdminApiClient({
+      accessToken,
+      refreshAccessToken: refreshAdminSession,
+      onSessionExpired: expireAdminSession,
+    }),
+    [accessToken, expireAdminSession, refreshAdminSession],
+  )
   const [metricsItems, setMetricsItems] = useState<DestinationMetricsSummary[]>([])
   const [isMetricsLoading, setIsMetricsLoading] = useState(false)
   const [metricsError, setMetricsError] = useState<string | null>(null)
@@ -2300,17 +2350,10 @@ export function AdminDashboard({
   // non-admin session is returned to the public app; the backend remains the
   // security boundary and re-authorizes every admin API request.
   useEffect(() => {
-    if (getSessionRoles(accessToken).length > 0) {
+    if (isRedirecting.current || getSessionRoles(accessToken).length > 0) {
       return
     }
     let isCurrent = true
-    const redirectUnauthorizedVisitor = () => {
-      if (!isCurrent || isRedirecting.current) {
-        return
-      }
-      isRedirecting.current = true
-      redirectToPublicHome(PUBLIC_HOME_URL)
-    }
     authClient
       .restoreSession()
       .then((session) => {
@@ -2321,7 +2364,9 @@ export function AdminDashboard({
           if (useSamplePreview) {
             return
           }
-          redirectUnauthorizedVisitor()
+          if (isCurrent) {
+            expireAdminSession()
+          }
           return
         }
         storeAccessToken(session.accessToken)
@@ -2329,14 +2374,14 @@ export function AdminDashboard({
         setIsSessionAuthorized(true)
       })
       .catch(() => {
-        if (!useSamplePreview) {
-          redirectUnauthorizedVisitor()
+        if (isCurrent && !useSamplePreview) {
+          expireAdminSession()
         }
       })
     return () => {
       isCurrent = false
     }
-  }, [accessToken, authClient, redirectToPublicHome, useSamplePreview])
+  }, [accessToken, authClient, expireAdminSession, useSamplePreview])
 
   useEffect(() => {
     if (sessionRoles.length === 0 || isTabAllowed(sessionRoles, activeTab)) {

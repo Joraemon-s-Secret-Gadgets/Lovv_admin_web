@@ -125,6 +125,106 @@ describe('adminApi', () => {
     })
   })
 
+  it.each([
+    [401, { error: { code: 'UNAUTHORIZED', message: 'Authentication is required' } }],
+    [403, { message: 'Unauthorized' }],
+  ])('refreshes once after a Gateway authentication failure (%s)', async (status, body) => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(await jsonResponse(body, { status }))
+      .mockResolvedValueOnce(await jsonResponse({ items: [] }))
+    const refreshAccessToken = vi.fn().mockResolvedValue('fresh-token')
+    const client = createAdminApiClient({
+      accessToken: 'expired-token',
+      fetchImpl,
+      refreshAccessToken,
+    })
+
+    await client.listProposals()
+
+    expect(refreshAccessToken).toHaveBeenCalledTimes(1)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect((fetchImpl.mock.calls[0][1].headers as Headers).get('Authorization')).toBe('Bearer expired-token')
+    expect((fetchImpl.mock.calls[1][1].headers as Headers).get('Authorization')).toBe('Bearer fresh-token')
+  })
+
+  it('preserves a POST method and JSON body when retrying once', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(await jsonResponse({ message: 'Unauthorized' }, { status: 403 }))
+      .mockResolvedValueOnce(await jsonResponse({ proposal: { proposalId: 'proposal-1' } }))
+    const client = createAdminApiClient({
+      accessToken: 'expired-token',
+      fetchImpl,
+      refreshAccessToken: vi.fn().mockResolvedValue('fresh-token'),
+    })
+
+    await client.createProposal({
+      contentType: 'festival',
+      regionId: 'KR-42-150',
+      title: '강릉 축제',
+      evidenceText: '공식 공지',
+    })
+
+    const firstInit = fetchImpl.mock.calls[0][1] as RequestInit
+    const retryInit = fetchImpl.mock.calls[1][1] as RequestInit
+    expect(retryInit.method).toBe('POST')
+    expect(retryInit.body).toBe(firstInit.body)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not retry again when the refreshed request is still unauthorized', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(await jsonResponse({ message: 'Unauthorized' }, { status: 403 }))
+      .mockResolvedValueOnce(await jsonResponse({ message: 'Unauthorized' }, { status: 403 }))
+    const onSessionExpired = vi.fn()
+    const client = createAdminApiClient({
+      fetchImpl,
+      refreshAccessToken: vi.fn().mockResolvedValue('fresh-token'),
+      onSessionExpired,
+    })
+
+    await expect(client.listProposals()).rejects.toMatchObject({
+      status: 403,
+      code: 'GATEWAY_UNAUTHORIZED',
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(onSessionExpired).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([500, 502, 504])('does not refresh server errors (%s)', async (status) => {
+    const refreshAccessToken = vi.fn().mockResolvedValue('fresh-token')
+    const client = createAdminApiClient({
+      fetchImpl: vi.fn().mockResolvedValue(await jsonResponse({}, { status })),
+      refreshAccessToken,
+    })
+
+    await expect(client.listProposals()).rejects.toMatchObject({ status })
+    expect(refreshAccessToken).not.toHaveBeenCalled()
+  })
+
+  it('does not refresh business authorization failures or network errors', async () => {
+    const refreshAccessToken = vi.fn().mockResolvedValue('fresh-token')
+    const businessClient = createAdminApiClient({
+      fetchImpl: vi.fn().mockResolvedValue(await jsonResponse({
+        error: { code: 'SUPER_ADMIN_REQUIRED', message: 'Super admin role is required' },
+      }, { status: 403 })),
+      refreshAccessToken,
+    })
+
+    await expect(businessClient.listProposals()).rejects.toMatchObject({
+      status: 403,
+      code: 'SUPER_ADMIN_REQUIRED',
+      message: 'Super admin role is required',
+    })
+    expect(refreshAccessToken).not.toHaveBeenCalled()
+
+    const networkClient = createAdminApiClient({
+      fetchImpl: vi.fn().mockRejectedValue(new TypeError('Failed to fetch')),
+      refreshAccessToken,
+    })
+    await expect(networkClient.listProposals()).rejects.toThrow('Failed to fetch')
+    expect(refreshAccessToken).not.toHaveBeenCalled()
+  })
+
   it('surfaces self-review authorization failures without remapping the code', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse(

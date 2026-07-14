@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { AdminDashboard } from './admin/AdminDashboard'
-import { clearAccessToken } from './admin/session'
+import { clearAccessToken, getStoredAccessToken } from './admin/session'
 
 const apiProposal = {
   proposalId: 'proposal-1',
@@ -657,8 +657,8 @@ describe('Lovv admin console', () => {
           return jsonResponse({ items: [] })
         }
         return jsonResponse(
-          { error: { code: 'UNAUTHORIZED', message: 'Authentication is required' } },
-          { status: 401 },
+          { error: { code: 'ADMIN_ACCESS_REQUIRED', message: 'Admin access is required' } },
+          { status: 403 },
         )
       }),
     )
@@ -666,7 +666,7 @@ describe('Lovv admin console', () => {
     render(<App />)
     fireEvent.click(screen.getByRole('tab', { name: '제안 검토' }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Authentication is required')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Admin access is required')
     expect(screen.getByText('표시할 제안이 없습니다.')).toBeInTheDocument()
   })
 
@@ -761,6 +761,76 @@ describe('Lovv admin console', () => {
       expect(screen.getByTestId('current-role-badge')).toHaveTextContent('R-ADMIN'),
     )
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/auth/session'))).toBe(true)
+  })
+
+  it('shares one session refresh across concurrent unauthorized admin requests', async () => {
+    const freshToken = makeToken(['R-ADMIN', 'R-SUPER-ADMIN'])
+    let resolveSession!: (response: Response) => void
+    const sessionResponse = new Promise<Response>((resolve) => {
+      resolveSession = resolve
+    })
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input)
+      if (url.includes('/api/v1/auth/session')) {
+        return sessionResponse
+      }
+      const authorization = new Headers(init?.headers).get('Authorization')
+      if (url.includes('/api/v1/admin/') && authorization !== `Bearer ${freshToken}`) {
+        return jsonResponse({ message: 'Unauthorized' }, { status: 403 })
+      }
+      if (url.includes('/api/v1/admin/security/mfa/status')) {
+        return jsonResponse({ mfa: verifiedMfaStatus })
+      }
+      return jsonResponse({ items: [] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+
+    await waitFor(() => {
+      const expiredAdminCalls = fetchMock.mock.calls.filter(([input, init]) =>
+        requestUrl(input).includes('/api/v1/admin/') &&
+        new Headers((init as RequestInit | undefined)?.headers).get('Authorization') !== `Bearer ${freshToken}`,
+      )
+      expect(expiredAdminCalls.length).toBeGreaterThanOrEqual(2)
+    })
+    resolveSession(await jsonResponse({
+      accessToken: freshToken,
+      user: { userId: 'admin-1', roles: ['R-ADMIN', 'R-SUPER-ADMIN'] },
+    }))
+
+    await waitFor(() => expect(getStoredAccessToken()).toBe(freshToken))
+    await waitFor(() => {
+      const refreshedCalls = fetchMock.mock.calls.filter(([, init]) =>
+        new Headers((init as RequestInit | undefined)?.headers).get('Authorization') === `Bearer ${freshToken}`,
+      )
+      expect(refreshedCalls.length).toBeGreaterThanOrEqual(2)
+    })
+    expect(fetchMock.mock.calls.filter(([input]) => requestUrl(input).includes('/api/v1/auth/session'))).toHaveLength(1)
+    expect(screen.queryByText('Admin session is unauthorized.')).not.toBeInTheDocument()
+  })
+
+  it('redirects once when a refreshed token has no admin role', async () => {
+    const userToken = makeToken(['R-USER'])
+    const redirectToPublicHome = vi.fn()
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = requestUrl(input)
+      if (url.includes('/api/v1/auth/session')) {
+        return jsonResponse({ accessToken: userToken, user: { userId: 'user-1', roles: ['R-USER'] } })
+      }
+      if (url.includes('/api/v1/admin/')) {
+        return jsonResponse({ message: 'Unauthorized' }, { status: 403 })
+      }
+      return jsonResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<AdminDashboard redirectToPublicHome={redirectToPublicHome} />)
+
+    await waitFor(() => expect(redirectToPublicHome).toHaveBeenCalledTimes(1))
+    expect(redirectToPublicHome).toHaveBeenCalledWith('https://www.lovv.site/home')
+    expect(getStoredAccessToken()).toBe('')
+    expect(screen.queryByTestId('lovv-admin-shell')).not.toBeInTheDocument()
   })
 
   it('loads reflection job history for a published destination', async () => {

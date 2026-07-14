@@ -42,6 +42,8 @@ export type AdminApiClientOptions = {
   baseUrl?: string
   accessToken?: string
   fetchImpl?: typeof fetch
+  refreshAccessToken?: () => Promise<string>
+  onSessionExpired?: () => void
 }
 
 // Shape of GET /api/v1/auth/session. The backend is the source of truth for
@@ -157,34 +159,40 @@ export function createAdminApiClient(options: AdminApiClientOptions = {}) {
   const fetchImpl = options.fetchImpl ?? fetch
 
   async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    // Only Accept / Content-Type / Authorization are set here; request bodies
-    // carry content fields only, never authority fields.
-    const headers = new Headers(init.headers)
-    headers.set('Accept', 'application/json')
-    if (init.body && !headers.has('Content-Type')) {
-      headers.set('Content-Type', 'application/json')
-    }
-    if (accessToken) {
-      headers.set('Authorization', `Bearer ${accessToken}`)
-    }
+    const send = async (token: string) => {
+      // Rebuild headers for every attempt so a refreshed token replaces the
+      // expired Authorization value while preserving the original request.
+      const headers = new Headers(init.headers)
+      headers.set('Accept', 'application/json')
+      if (init.body && !headers.has('Content-Type')) {
+        headers.set('Content-Type', 'application/json')
+      }
+      if (token) {
+        headers.set('Authorization', `Bearer ${token}`)
+      }
 
-    const response = await fetchImpl(`${baseUrl}${path}`, {
-      ...init,
-      credentials: 'include',
-      headers,
-    })
-    const payload = await readJson(response)
-
-    if (!response.ok) {
-      const error = payload?.error ?? {}
-      throw new AdminApiError(
-        response.status,
-        typeof error.code === 'string' ? error.code : 'ADMIN_API_ERROR',
-        typeof error.message === 'string' ? error.message : 'Admin API request failed.',
-      )
+      const response = await fetchImpl(`${baseUrl}${path}`, {
+        ...init,
+        credentials: 'include',
+        headers,
+      })
+      return { response, payload: await readJson(response) }
     }
 
-    return payload as T
+    let result = await send(accessToken)
+    if (isGatewayAuthenticationFailure(result.response, result.payload) && options.refreshAccessToken) {
+      const refreshedToken = await options.refreshAccessToken()
+      result = await send(refreshedToken)
+      if (isGatewayAuthenticationFailure(result.response, result.payload)) {
+        options.onSessionExpired?.()
+      }
+    }
+
+    if (!result.response.ok) {
+      throw toAdminApiError(result.response, result.payload)
+    }
+
+    return result.payload as T
   }
 
   return {
@@ -589,6 +597,40 @@ async function readJson(response: Response) {
   } catch {
     return {}
   }
+}
+
+function isGatewayAuthenticationFailure(response: Response, payload: unknown): boolean {
+  if (response.status === 401) {
+    return true
+  }
+  if (response.status !== 403 || !payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return false
+  }
+  const record = payload as Record<string, unknown>
+  return Object.keys(record).length === 1 && record.message === 'Unauthorized'
+}
+
+function toAdminApiError(response: Response, payload: unknown): AdminApiError {
+  const record = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : {}
+  const error = record.error && typeof record.error === 'object' && !Array.isArray(record.error)
+    ? record.error as Record<string, unknown>
+    : {}
+  const isGatewayUnauthorized = isGatewayAuthenticationFailure(response, payload)
+  return new AdminApiError(
+    response.status,
+    typeof error.code === 'string'
+      ? error.code
+      : isGatewayUnauthorized
+        ? 'GATEWAY_UNAUTHORIZED'
+        : 'ADMIN_API_ERROR',
+    typeof error.message === 'string'
+      ? error.message
+      : isGatewayUnauthorized
+        ? 'Admin session is unauthorized.'
+        : 'Admin API request failed.',
+  )
 }
 
 // Auth/session client, separate from the data client because session restore and
