@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { AdminDashboard } from './admin/AdminDashboard'
 import { clearAccessToken } from './admin/session'
 
 const apiProposal = {
@@ -416,17 +417,40 @@ describe('Lovv admin console', () => {
     expect(JSON.parse(String((fetchMock.mock.calls[approveIndex][1] as RequestInit).body))).toEqual({})
   })
 
-  it('locks every workspace when the token carries no known admin role', () => {
+  it('redirects R-USER sessions before rendering the admin console', async () => {
     useSessionRole('R-USER')
+    vi.stubEnv('VITE_LOVV_USE_SAMPLE_DATA', 'false')
+    const redirectToPublicHome = vi.fn()
 
-    render(<App />)
+    render(<AdminDashboard redirectToPublicHome={redirectToPublicHome} />)
 
-    expect(screen.getByTestId('current-role-badge')).toHaveTextContent('역할 없음')
-    expect(screen.getByRole('tab', { name: '운영 지표' })).toBeDisabled()
-    expect(screen.getByRole('tab', { name: '데이터 제안' })).toBeDisabled()
-    expect(screen.getByRole('tab', { name: '제안 검토' })).toBeDisabled()
-    expect(screen.getByRole('tab', { name: '반영 상태' })).toBeDisabled()
-    expect(screen.getByRole('heading', { name: '유효한 세션 역할이 없습니다' })).toBeInTheDocument()
+    expect(screen.queryByTestId('lovv-admin-shell')).not.toBeInTheDocument()
+    await waitFor(() =>
+      expect(redirectToPublicHome).toHaveBeenCalledWith('https://www.lovv.site/home'),
+    )
+  })
+
+  it('redirects visitors whose session cannot be restored', async () => {
+    vi.stubEnv('VITE_LOVV_ADMIN_ACCESS_TOKEN', '')
+    vi.stubEnv('VITE_LOVV_USE_SAMPLE_DATA', 'false')
+    clearAccessToken()
+    const redirectToPublicHome = vi.fn()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        jsonResponse(
+          { error: { code: 'UNAUTHORIZED', message: 'Authentication is required' } },
+          { status: 401 },
+        ),
+      ),
+    )
+
+    render(<AdminDashboard redirectToPublicHome={redirectToPublicHome} />)
+
+    expect(screen.queryByTestId('lovv-admin-shell')).not.toBeInTheDocument()
+    await waitFor(() =>
+      expect(redirectToPublicHome).toHaveBeenCalledWith('https://www.lovv.site/home'),
+    )
   })
 
   it('summarizes local operator metrics from the admin API', async () => {

@@ -2,7 +2,7 @@
 // ./session), and their union gates which tabs/actions are shown. All proposal
 // data flows through ./adminApi; the backend re-authorizes every call, so this
 // gating is UX, not a security boundary.
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { AdminApiError, createAdminApiClient, createAdminAuthClient } from './adminApi'
 import {
@@ -13,7 +13,14 @@ import {
   sampleProposals,
   summaryMetrics,
 } from './adminData'
-import { getDevAccessToken, getSessionRoles, getStoredAccessToken, resolvePrimaryRole, storeAccessToken } from './session'
+import {
+  decodeTokenRoles,
+  getDevAccessToken,
+  getSessionRoles,
+  getStoredAccessToken,
+  resolvePrimaryRole,
+  storeAccessToken,
+} from './session'
 import type {
   AdminNotice,
   AdminMfaEnrollment,
@@ -2067,7 +2074,16 @@ function AdminMfaGate({
 
 type PendingDecision = { action: 'approve' | 'reject'; requestId: string; decisionReason: string }
 
-export function AdminDashboard() {
+const PUBLIC_HOME_URL = 'https://www.lovv.site/home'
+const replaceWithPublicHome = (url: string) => window.location.replace(url)
+
+type AdminDashboardProps = {
+  redirectToPublicHome?: (url: string) => void
+}
+
+export function AdminDashboard({
+  redirectToPublicHome = replaceWithPublicHome,
+}: AdminDashboardProps = {}) {
   // Access token drives both the API client (Bearer header) and the session role.
   // Initial value is the cached token (survives refresh); if absent we restore it
   // from /api/v1/auth/session below. getSessionRoles() also falls back to the Vite
@@ -2075,6 +2091,10 @@ export function AdminDashboard() {
   const [accessToken, setAccessToken] = useState<string>(() => getStoredAccessToken() || getDevAccessToken())
   const useSamplePreview =
     import.meta.env.DEV && import.meta.env.VITE_LOVV_USE_SAMPLE_DATA === 'true' && !accessToken
+  const [isSessionAuthorized, setIsSessionAuthorized] = useState(
+    () => getSessionRoles(accessToken).length > 0 || useSamplePreview,
+  )
+  const isRedirecting = useRef(false)
   // Session roles come from the token, not a manual switcher. currentRole is the
   // display/default-tab role; tab/action access uses the full role union.
   const sessionRoles = useMemo(() => {
@@ -2276,29 +2296,47 @@ export function AdminDashboard() {
     [adminApi, loadOperations],
   )
 
-  // On first load without a cached/dev token, exchange the session cookie for an
-  // access token. Failures are swallowed: an unauthenticated visitor simply sees
-  // the "no session role" panel, and the backend still rejects any API call.
+  // Fail closed before rendering the console. A missing, expired, malformed, or
+  // non-admin session is returned to the public app; the backend remains the
+  // security boundary and re-authorizes every admin API request.
   useEffect(() => {
     if (getSessionRoles(accessToken).length > 0) {
       return
     }
     let isCurrent = true
+    const redirectUnauthorizedVisitor = () => {
+      if (!isCurrent || isRedirecting.current) {
+        return
+      }
+      isRedirecting.current = true
+      redirectToPublicHome(PUBLIC_HOME_URL)
+    }
     authClient
       .restoreSession()
       .then((session) => {
-        if (isCurrent && session.accessToken) {
-          storeAccessToken(session.accessToken)
-          setAccessToken(session.accessToken)
+        if (!isCurrent) {
+          return
         }
+        if (!session.accessToken || decodeTokenRoles(session.accessToken).length === 0) {
+          if (useSamplePreview) {
+            return
+          }
+          redirectUnauthorizedVisitor()
+          return
+        }
+        storeAccessToken(session.accessToken)
+        setAccessToken(session.accessToken)
+        setIsSessionAuthorized(true)
       })
       .catch(() => {
-        // Unauthenticated or session expired; gating falls back to "no role".
+        if (!useSamplePreview) {
+          redirectUnauthorizedVisitor()
+        }
       })
     return () => {
       isCurrent = false
     }
-  }, [accessToken, authClient])
+  }, [accessToken, authClient, redirectToPublicHome, useSamplePreview])
 
   useEffect(() => {
     if (sessionRoles.length === 0 || isTabAllowed(sessionRoles, activeTab)) {
@@ -2781,6 +2819,14 @@ export function AdminDashboard() {
     } finally {
       setIsHistoryLoading(false)
     }
+  }
+
+  if (!isSessionAuthorized) {
+    return (
+      <main className="session-gate" aria-live="polite">
+        <p role="status">관리자 권한을 확인하고 있습니다.</p>
+      </main>
+    )
   }
 
   return (
